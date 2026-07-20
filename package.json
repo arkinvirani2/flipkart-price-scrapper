@@ -1,0 +1,22 @@
+{
+  "name": "flipkart-seller-price-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Compare Flipkart product page price against a specific seller's price from the 'See other sellers' list.",
+  "main": "dist/scraper/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "scrape": "ts-node scraper/index.ts",
+    "verify": "ts-node -T scraper/verify.ts",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
