@@ -34,6 +34,9 @@ npm run scrape -- --file inputs.json --out results.json
 
 # watch it work
 npm run scrape -- --url "..." --seller "MALBEC" --headed
+
+# large batch (hundreds to thousands of products)
+npm run scrape -- --file inputs.json --out results.json --delay 1500 --resume
 ```
 
 Programmatic:
@@ -174,6 +177,29 @@ Two things the harness does deliberately, both learned the hard way:
 
 When Flipkart redesigns: re-save both snapshots, run `npm run verify`, and repair whatever
 goes red in `selectors.ts`.
+
+## Large batches
+
+At roughly 4 s/product, 1000 items is a 1–3 hour run. Three things make that survivable:
+
+- **Every result is journalled as it completes**, to an NDJSON file next to `--out`
+  (`results.json` → `results.ndjson`, override with `--journal`). A crash at item 900
+  loses nothing.
+- **`--resume`** skips inputs already in the journal, keyed on SKU + product URL. Products
+  that ended `BLOCKED` are *not* treated as done — that status describes the bot wall, not
+  the product, so a resume retries them. A journal left half-written by a `Ctrl-C` is
+  repaired on resume.
+- **`--delay <ms>`** (plus `--jitter`, default 400) paces the run. Default is 0, which keeps
+  small runs as fast as they were; use ~1500 for anything in the hundreds. 1000 back-to-back
+  requests from one IP is what actually trips Flipkart.
+
+If a product hits a captcha or a 403/429/503, the run pauses `--block-backoff` ms (default
+60 s, doubling) and retries it up to `--block-retries` times (default 3). If it is still
+blocked, the run **stops** rather than burning the remaining inputs against a wall — rerun
+with `--resume` once you're unblocked.
+
+Without `--resume`, an existing journal is deleted rather than merged, so two runs never
+silently blend into one output file.
 
 ## Operational notes
 

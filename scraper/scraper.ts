@@ -16,8 +16,15 @@ import {
   readProductJsonLd,
 } from './productPage';
 import { attachNetworkCapture, getSellerPrice, openSellerDrawer, type NetworkCapture } from './sellerDrawer';
-import type { ResolvedOptions, ScrapeInput, ScrapeResult, ScrapeStatus, ScraperOptions } from './types';
-import { ScrapeError, errorMessage, log, resolveOptions, setVerbose } from './utils';
+import type {
+  ResolvedOptions,
+  ResultSink,
+  ScrapeInput,
+  ScrapeResult,
+  ScrapeStatus,
+  ScraperOptions,
+} from './types';
+import { ScrapeError, errorMessage, jitteredDelay, log, resolveOptions, setVerbose } from './utils';
 
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -57,8 +64,18 @@ export async function scrapeProduct(input: ScrapeInput, options: ScraperOptions 
  *
  * Sequential on purpose: Flipkart rate-limits aggressively, and a single browser
  * with one tab at a time is the difference between a clean run and a captcha.
+ *
+ * `onResult` fires after each product, before the next one starts — use it to
+ * persist incrementally so a crash at item 900 of 1000 doesn't lose the run.
+ * The loop stops early if a product stays BLOCKED through every back-off;
+ * anything after that would only be blocked too, and the untouched inputs are
+ * better left for a resumed run.
  */
-export async function scrapeProducts(inputs: ScrapeInput[], options: ScraperOptions = {}): Promise<ScrapeResult[]> {
+export async function scrapeProducts(
+  inputs: ScrapeInput[],
+  options: ScraperOptions = {},
+  onResult?: ResultSink,
+): Promise<ScrapeResult[]> {
   const resolved = resolveOptions(options);
   setVerbose(resolved.verbose);
 
@@ -67,14 +84,20 @@ export async function scrapeProducts(inputs: ScrapeInput[], options: ScraperOpti
 
   try {
     for (const [index, input] of inputs.entries()) {
+      if (index > 0) await jitteredDelay(resolved.delayMs, resolved.delayJitterMs);
+
       log.step(`\n=== [${index + 1}/${inputs.length}] ${input.sku} — ${input.targetSeller} ===`);
-      const context = await createContext(browser, resolved);
-      try {
-        results.push(await scrapeInContext(context, input, resolved));
-      } catch (error) {
-        results.push(failure(input, 'ERROR', errorMessage(error)));
-      } finally {
-        await context.close().catch(() => undefined);
+      const result = await scrapeWithBackoff(browser, input, resolved);
+
+      results.push(result);
+      await onResult?.(result, index);
+
+      if (result.status === 'BLOCKED') {
+        const remaining = inputs.length - index - 1;
+        log.error(
+          `still blocked after ${resolved.blockRetries} back-off(s) — stopping with ${remaining} product(s) unprocessed.`,
+        );
+        break;
       }
     }
   } finally {
@@ -85,6 +108,41 @@ export async function scrapeProducts(inputs: ScrapeInput[], options: ScraperOpti
 }
 
 /* ---------------------------------------------------------------- internals */
+
+/**
+ * Run one product, pausing and retrying while it comes back BLOCKED.
+ *
+ * The pause doubles each time: a bot wall clears on Flipkart's schedule, not
+ * ours, so hammering it at a fixed interval just extends the block.
+ */
+async function scrapeWithBackoff(
+  browser: Browser,
+  input: ScrapeInput,
+  options: ResolvedOptions,
+): Promise<ScrapeResult> {
+  let result = await scrapeOnce(browser, input, options);
+
+  for (let attempt = 1; attempt <= options.blockRetries && result.status === 'BLOCKED'; attempt++) {
+    const backoffMs = options.blockBackoffMs * 2 ** (attempt - 1);
+    log.warn(`blocked — pausing ${Math.round(backoffMs / 1000)}s (back-off ${attempt}/${options.blockRetries})`);
+    await jitteredDelay(backoffMs, options.delayJitterMs);
+    result = await scrapeOnce(browser, input, options);
+  }
+
+  return result;
+}
+
+/** One product in its own context, with every throw flattened into a result. */
+async function scrapeOnce(browser: Browser, input: ScrapeInput, options: ResolvedOptions): Promise<ScrapeResult> {
+  const context = await createContext(browser, options);
+  try {
+    return await scrapeInContext(context, input, options);
+  } catch (error) {
+    return failure(input, 'ERROR', errorMessage(error));
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
 
 async function launchBrowser(options: ResolvedOptions): Promise<Browser> {
   return chromium.launch({

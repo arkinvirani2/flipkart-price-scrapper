@@ -17,6 +17,7 @@ export type ScrapeStatus =
   | 'SELLER_NOT_FOUND'
   | 'MAIN_PRICE_NOT_FOUND'
   | 'SELLER_PRICE_NOT_FOUND'
+  | 'BLOCKED'
   | 'ERROR';
 
 export interface ScrapeResult {
@@ -70,7 +71,24 @@ export interface ScraperOptions {
   userAgent?: string;
   /** Screenshot destination on failure. */
   screenshotOnFailureDir?: string;
+
+  /**
+   * Pause between products, in ms. Zero (the default) preserves the old
+   * back-to-back behaviour; anything above ~1000 is strongly advised for
+   * batches in the hundreds, where 1000 rapid hits from one IP is what
+   * actually trips Flipkart's bot wall.
+   */
+  delayMs?: number;
+  /** Random 0..n ms added to each `delayMs` pause, so the cadence isn't robotic. */
+  delayJitterMs?: number;
+  /** First back-off pause after a BLOCKED product. Doubles per consecutive block. */
+  blockBackoffMs?: number;
+  /** How many times to back off and retry one product before giving up on the run. */
+  blockRetries?: number;
 }
+
+/** Called after each product in a batch, before the next one starts. */
+export type ResultSink = (result: ScrapeResult, index: number) => void | Promise<void>;
 
 export interface ResolvedOptions extends Required<Omit<ScraperOptions, 'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent'>> {
   storageStatePath?: string;

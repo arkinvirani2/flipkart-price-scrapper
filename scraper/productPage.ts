@@ -5,6 +5,8 @@
 
 import type { Locator, Page } from 'playwright';
 import {
+  BLOCKED_STATUSES,
+  BLOCKED_TEXT,
   JSON_LD,
   MAIN_PRICE,
   PRICE_PATTERN_SOURCE,
@@ -38,16 +40,25 @@ export async function openProduct(page: Page, productUrl: string, options: Resol
 
   await withRetry(
     async () => {
-      await page.goto(productUrl, {
+      const response = await page.goto(productUrl, {
         waitUntil: 'domcontentloaded',
         timeout: options.navigationTimeout,
       });
+
+      // Retrying a rate-limit immediately only digs the hole deeper, so this is
+      // a ScrapeError — withRetry rethrows those untouched and the batch runner
+      // backs off instead.
+      const status = response?.status();
+      if (status && (BLOCKED_STATUSES as readonly number[]).includes(status)) {
+        throw new ScrapeError('BLOCKED', `Flipkart returned HTTP ${status}.`);
+      }
     },
     { attempts: 3, description: 'product navigation' },
   );
 
   await waitForPageSettled(page, options.navigationTimeout);
   await dismissOverlays(page);
+  await assertNotBlocked(page);
 
   const ready = await waitFor(
     async () => {
@@ -61,7 +72,26 @@ export async function openProduct(page: Page, productUrl: string, options: Resol
   );
 
   if (!ready) {
+    // A bot wall renders fast and has no price, so it lands here rather than in
+    // the check above — look once more before blaming the selectors.
+    await assertNotBlocked(page);
     throw new ScrapeError('MAIN_PRICE_NOT_FOUND', 'Product page rendered no price or structured data.');
+  }
+}
+
+/**
+ * Throw BLOCKED when the page is a captcha / rate-limit wall rather than a
+ * product. Best-effort: an unreadable body is not treated as a block.
+ */
+export async function assertNotBlocked(page: Page): Promise<void> {
+  const body = await page.locator('body').innerText().catch(() => '');
+  if (!body) return;
+
+  // Only the opening screenful — "captcha" can legitimately appear deep in
+  // unrelated page furniture, but a real wall says so immediately.
+  const match = BLOCKED_TEXT.exec(body.slice(0, 2000));
+  if (match) {
+    throw new ScrapeError('BLOCKED', `Page looks like a bot wall (matched "${match[0]}").`);
   }
 }
 

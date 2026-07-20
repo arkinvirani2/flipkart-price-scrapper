@@ -118,6 +118,17 @@ export const UNAVAILABLE_TEXT =
   /(currently unavailable|sold out|out of stock|this item is not available)/i;
 
 /**
+ * Rate-limit / bot-wall markers. Distinct from UNAVAILABLE_TEXT: these mean
+ * "back off", not "this product is dead", and the caller must pause rather than
+ * burn through the rest of the batch.
+ */
+export const BLOCKED_TEXT =
+  /(captcha|unusual traffic|are you a human|verify you are|too many requests|access denied|request blocked|retry after)/i;
+
+/** HTTP statuses that mean the same thing as BLOCKED_TEXT. */
+export const BLOCKED_STATUSES = [403, 429, 503] as const;
+
+/**
  * Matches "₹1,234", "Rs. 1234", "INR 1234.50". Capture group 1 is the raw number.
  * Kept here so DOM-side and network-side parsing agree on one definition.
  */

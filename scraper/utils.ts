@@ -37,7 +37,8 @@ export type ScrapeErrorCode =
   | 'SELLER_LIST_LOAD_FAILED'
   | 'SELLER_NOT_FOUND'
   | 'MAIN_PRICE_NOT_FOUND'
-  | 'SELLER_PRICE_NOT_FOUND';
+  | 'SELLER_PRICE_NOT_FOUND'
+  | 'BLOCKED';
 
 /** An expected, classified failure — distinct from an unhandled crash. */
 export class ScrapeError extends Error {
@@ -59,6 +60,12 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   useNetworkCapture: true,
   preferDirectSellerNavigation: true,
   verbose: true,
+  // Zero keeps single-product and small-batch runs exactly as fast as before.
+  // Long batches should set --delay; see the note on ScraperOptions.delayMs.
+  delayMs: 0,
+  delayJitterMs: 400,
+  blockBackoffMs: 60_000,
+  blockRetries: 3,
 };
 
 export function resolveOptions(options: ScraperOptions = {}): ResolvedOptions {
@@ -97,6 +104,17 @@ export async function waitFor<T>(
 /** Plain sleep. Used only for poll backoff, never as a substitute for a wait. */
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Sleep for `ms` plus a random 0..`jitterMs`.
+ *
+ * Politeness throttle between products, not a wait for content — a perfectly
+ * even request cadence is itself a bot signal, hence the jitter.
+ */
+export function jitteredDelay(ms: number, jitterMs: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return delay(ms + Math.floor(Math.random() * Math.max(0, jitterMs)));
 }
 
 /**
