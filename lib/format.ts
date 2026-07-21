@@ -69,6 +69,13 @@ export function formatSettlement(value: number | null | undefined): string {
   return value.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
+/** Signed plain number, no currency: `+4`, `-12`, `0`. For the settlement lists' Difference column. */
+export function formatSignedNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+  return `${sign}${Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const date = new Date(iso);

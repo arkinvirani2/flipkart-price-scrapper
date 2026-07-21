@@ -8,11 +8,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useJobRows } from '@/hooks/useJobRows';
 import {
-  formatDifference,
   formatDifferencePercent,
   formatDuration,
-  formatPrice,
   formatSettlement,
+  formatSignedNumber,
 } from '@/lib/format';
 import { computeSettlement } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
@@ -29,8 +28,8 @@ import { SettlementTable, type SettlementColumn, type SettlementRow } from './Se
  */
 
 const BASE_COLUMNS: SettlementColumn[] = [
-  { key: 'sellerPrice', header: 'Seller Price', width: 6, align: 'right', cell: ({ settlement }) => formatPrice(settlement.sellerPrice) },
-  { key: 'currentPrice', header: 'Current Price', width: 6, align: 'right', cell: ({ settlement }) => formatPrice(settlement.currentPrice) },
+  { key: 'sellerPrice', header: 'Seller Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.sellerPrice) },
+  { key: 'currentPrice', header: 'Current Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentPrice) },
   { key: 'fsn', header: 'FSN', width: 9, cell: ({ row }) => <span title={row.fsn}>{row.fsn}</span> },
   { key: 'seller', header: 'Seller', width: 9, cell: ({ row }) => <span title={row.targetSeller}>{row.targetSeller}</span> },
   { key: 'status', header: 'Status', width: 6, cell: ({ row }) => <RowStatusBadge status={row.status} /> },
@@ -40,7 +39,7 @@ const BASE_COLUMNS: SettlementColumn[] = [
     header: 'Difference',
     width: 6,
     align: 'right',
-    cell: ({ settlement }) => <span className={signClass(settlement.difference)}>{formatDifference(settlement.difference)}</span>,
+    cell: ({ settlement }) => <span className={signClass(settlement.difference)}>{formatSignedNumber(settlement.difference)}</span>,
   },
   {
     key: 'differencePct',
