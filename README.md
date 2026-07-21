@@ -3,6 +3,10 @@
 Compares the price headlined on a Flipkart product page against a **specific seller's**
 price inside the "See other sellers" list.
 
+There are two ways to run it: a **CLI** (below, under "Usage") and a **web dashboard**
+(next section). Both drive the exact same scraper and share the same journal format — a
+batch started in one can be resumed by the other.
+
 ```
 scraper/
   selectors.ts     every Flipkart selector — the only file a DOM change should touch
@@ -19,9 +23,68 @@ scraper/
 ## Setup
 
 ```bash
-npm install
-npx playwright install chromium
+npm install            # also runs `playwright install chromium` via postinstall
 ```
+
+## Dashboard
+
+A Next.js control panel over the same scraper: upload a JSON file, review the validation,
+start the batch, watch it live, pause/resume/stop, and export CSV/XLSX — no terminal.
+
+```bash
+npm run dev            # http://localhost:3000  (development)
+# or
+npm run build && npm start   # production
+```
+
+Then: **New batch** → drop your JSON file → review → **Create batch** → **Start**.
+
+### Workflow
+
+1. **Upload** an array of `{ productUrl, targetSeller, sku, fsn }`. It is validated for
+   required fields, duplicate rows (same sku + URL), invalid URLs, and malformed JSON —
+   with every problem listed per-row before anything is created. (A file using `skn`
+   instead of `fsn` is rejected with a message naming the fix.)
+2. **Dashboard** — nine stat cards (total, pending, running, completed, succeeded, failed,
+   success %, average time, estimated remaining, queue length).
+3. **Live progress** — current product, step, per-product and batch progress bars,
+   elapsed time, ETA, browser status, current seller and URL.
+4. **Controls** — Start · Pause · Resume · Stop.
+   - **Pause** lets the current product finish and be saved, then stops the queue.
+   - **Resume** continues from the first unfinished product; completed products are never
+     re-scraped. Rows that were `BLOCKED` are retried.
+   - **Stop** aborts immediately; the in-flight product is left pending (not recorded as a
+     failure) so a later resume scrapes it cleanly.
+5. **Queue** — virtualized table (handles thousands of rows), with filters for status, SKU,
+   FSN, seller, URL, date, duration and failure reason, plus global search.
+6. **Failed** — reason, failure screenshot (view/download), and per-row or bulk retry.
+7. **Logs** — timestamped, level-coded, searchable, filterable, downloadable.
+8. **Analytics** — outcome, scrape-time distribution, products per hour, failure reasons,
+   seller distribution.
+9. **Export** — CSV or XLSX with every scraper field; respects the active filters.
+
+### Crash recovery
+
+The result journal is written to disk *before* the next product starts, so a browser
+crash, a server restart, or a power cut can only ever lose the single product that was
+in flight. On the next start the dashboard detects any batch that was mid-run, marks it
+**Interrupted**, and offers **Resume** — completed products are already safe.
+
+### Where dashboard data lives
+
+Under `data/jobs/<jobId>/` (git-ignored): `job.json` (manifest), `inputs.json` (the upload
+verbatim), `results.ndjson` (the same journal format the CLI uses), `logs.ndjson`, and
+`screenshots/`. Delete a batch from its page to remove the whole directory.
+
+### Deployment — read before hosting
+
+This is designed to **run on one long-lived Node host** (your machine, or a container on
+Railway / Render / Fly / a VPS). It is **not deployable to Vercel or any serverless
+platform**: Playwright needs a persistent process and a real Chromium binary, a
+1000-product batch runs for hours (far past any function timeout), and the crash-recovery
+guarantee depends on a durable local disk. One job runs at a time by design — concurrent
+scraping trips Flipkart's bot wall, which is the same reason the CLI is sequential. Keep
+the host awake for the length of a batch.
 
 ## Usage
 
@@ -230,8 +293,19 @@ npm run scrape -- --url "..." --seller "TREVIAA" --quiet | Out-File result.json
 Exit code is `0` when at least one product succeeded, `1` otherwise — so shell and CI
 callers can branch on it.
 
+## Project layout
 
+```
+scraper/          the Playwright scraper — unchanged core, called by both CLI and dashboard
+  journal.ts      NDJSON journal + resume rule, shared by the CLI and the dashboard
+app/              Next.js App Router — dashboard pages and API routes
+components/        UI: dashboard, queue, charts, logs, upload, shadcn primitives
+lib/              store (job/log/paths), runner (jobRunner/eventBus), services, validation
+hooks/            React Query + SSE hooks
+types/            dashboard types (re-export the scraper's own)
+data/             per-batch job data (git-ignored)
+```
 
-npm run scrape -- --url "https://dl.flipkart.com/s/HecE5QuuuN" --seller "TREVIAA" --sku "SKU12345" --fsn "FSN98765"
-
-npm run scrape -- --url "https://dl.flipkart.com/s/7w2lrWNNNN" --seller "Anuttar" --sku "SKU12345" --fsn "STIHZG79HGFP5EXP"
+The scraper is scoped to its own `tsconfig.scraper.json`; the CLI scripts (`npm run scrape`,
+`npm run verify`, `npm run typecheck:scraper`) use it, so the dashboard build never changes
+how the scraper compiles.

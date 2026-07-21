@@ -14,18 +14,46 @@ export function setVerbose(v: boolean): void {
   verbose = v;
 }
 
+export type LogLevel = 'step' | 'info' | 'warn' | 'error';
+
+/** Receives every log line, regardless of `verbose`. */
+export type LogSink = (level: LogLevel, message: string) => void;
+
+let sink: LogSink | null = null;
+
+/**
+ * Route log output somewhere besides the console — the dashboard's live log
+ * viewer, in practice.
+ *
+ * The sink is module-global, like `verbose`, which is safe only because a batch
+ * is scraped by one sequential loop at a time. Pass `null` to detach.
+ */
+export function setLogSink(next: LogSink | null): void {
+  sink = next;
+}
+
+/** Emit to the sink first — it must see the line even when `verbose` is off. */
+function emit(level: LogLevel, message: string, consoleWrite: () => void): void {
+  try {
+    sink?.(level, message);
+  } catch {
+    // A broken sink must never take down a scrape.
+  }
+  if (level === 'error' || verbose) consoleWrite();
+}
+
 export const log = {
   step(message: string): void {
-    if (verbose) console.log(message);
+    emit('step', message, () => console.log(message));
   },
   info(message: string): void {
-    if (verbose) console.log(`  ${message}`);
+    emit('info', message, () => console.log(`  ${message}`));
   },
   warn(message: string): void {
-    if (verbose) console.warn(`  ! ${message}`);
+    emit('warn', message, () => console.warn(`  ! ${message}`));
   },
   error(message: string): void {
-    console.error(`  x ${message}`);
+    emit('error', message, () => console.error(`  x ${message}`));
   },
 };
 
@@ -101,9 +129,26 @@ export async function waitFor<T>(
   }
 }
 
-/** Plain sleep. Used only for poll backoff, never as a substitute for a wait. */
-export function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Plain sleep. Used only for poll backoff, never as a substitute for a wait.
+ *
+ * With a `signal`, resolves early on abort — a block back-off can be a full
+ * minute, and a Stop that waits it out is a Stop that looks broken.
+ */
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, ms);
+
+    function finish(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    }
+
+    signal?.addEventListener('abort', finish, { once: true });
+  });
 }
 
 /**
@@ -112,9 +157,9 @@ export function delay(ms: number): Promise<void> {
  * Politeness throttle between products, not a wait for content — a perfectly
  * even request cadence is itself a bot signal, hence the jitter.
  */
-export function jitteredDelay(ms: number, jitterMs: number): Promise<void> {
+export function jitteredDelay(ms: number, jitterMs: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
-  return delay(ms + Math.floor(Math.random() * Math.max(0, jitterMs)));
+  return delay(ms + Math.floor(Math.random() * Math.max(0, jitterMs)), signal);
 }
 
 /**

@@ -1,1 +1,10 @@
 /node_modules
+/.next
+/dist
+/data
+next-env.d.ts
+*.tsbuildinfo
+
+# Local scraper scratch output — the dashboard writes its own under /data.
+/results.json
+/results.ndjson

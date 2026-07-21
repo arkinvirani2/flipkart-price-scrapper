@@ -39,7 +39,24 @@ export interface ScrapeResult {
   /** Where the seller list came from. */
   source?: 'network' | 'dom';
   durationMs?: number;
+  /** How many times this product was attempted, including back-off retries. 1 when it worked first go. */
+  attempts?: number;
+  /** Path to the failure screenshot, when one was captured. */
+  screenshotPath?: string;
 }
+
+/** Coarse stages of one product's scrape, for live progress reporting. */
+export type ScrapeStep =
+  | 'opening'
+  | 'reading-page'
+  | 'main-price'
+  | 'opening-sellers'
+  | 'finding-seller'
+  | 'comparing'
+  | 'done';
+
+/** Called as a product moves through the pipeline. Purely informational. */
+export type StepReporter = (step: ScrapeStep, input: ScrapeInput) => void;
 
 /** A seller row as read off the page (or a network payload). */
 export interface SellerCard {
@@ -85,13 +102,30 @@ export interface ScraperOptions {
   blockBackoffMs?: number;
   /** How many times to back off and retry one product before giving up on the run. */
   blockRetries?: number;
+
+  /**
+   * Cancels a batch. Checked between products, and — because a product can sit
+   * inside a 20s Playwright wait — also wired to close the active browser
+   * context, so aborting takes effect immediately rather than at the next
+   * product boundary. The aborted product is left unreported so a later resume
+   * picks it up untouched.
+   */
+  signal?: AbortSignal;
+
+  /** Fires as each product moves through the pipeline. Drives the live progress panel. */
+  onStep?: StepReporter;
 }
 
 /** Called after each product in a batch, before the next one starts. */
 export type ResultSink = (result: ScrapeResult, index: number) => void | Promise<void>;
 
-export interface ResolvedOptions extends Required<Omit<ScraperOptions, 'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent'>> {
+export interface ResolvedOptions
+  extends Required<
+    Omit<ScraperOptions, 'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent' | 'signal' | 'onStep'>
+  > {
   storageStatePath?: string;
   screenshotOnFailureDir?: string;
   userAgent?: string;
+  signal?: AbortSignal;
+  onStep?: StepReporter;
 }
