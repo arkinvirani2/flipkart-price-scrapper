@@ -15,6 +15,7 @@ import { LogViewer } from '@/components/logs/LogViewer';
 import { EMPTY_FILTERS, FilterBar, type QueueFilters } from '@/components/queue/FilterBar';
 import { ExportButtons } from '@/components/queue/ExportButtons';
 import { QueueTable } from '@/components/queue/QueueTable';
+import { SettlementView } from '@/components/settlement/SettlementView';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -133,6 +134,7 @@ export default function JobDetailPage() {
       <Tabs defaultValue="queue">
         <TabsList>
           <TabsTrigger value="queue">Queue</TabsTrigger>
+          <TabsTrigger value="settlement">Settlement</TabsTrigger>
           <TabsTrigger value="failed">
             Failed{stats.failed > 0 ? ` (${stats.failed})` : ''}
           </TabsTrigger>
@@ -157,6 +159,10 @@ export default function JobDetailPage() {
               to see everything.
             </p>
           )}
+        </TabsContent>
+
+        <TabsContent value="settlement">
+          <SettlementView jobId={jobId} />
         </TabsContent>
 
         <TabsContent value="failed">

@@ -5,6 +5,7 @@ import { ExternalLink, ImageIcon } from 'lucide-react';
 import { useRef } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { formatDifference, formatDuration, formatPrice, shortenUrl } from '@/lib/format';
+import { computeSettlement } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 import type { JobRow } from '@/types/dashboard';
 
@@ -113,7 +114,7 @@ export function QueueTable({ rows, onSelect, emptyMessage = 'No products match t
                         : undefined
                     }
                   >
-                    {row.result?.status === 'OK' ? formatDifference(row.result.difference) : '—'}
+                    {row.result?.status === 'OK' ? formatDifference(computeSettlement(row).difference) : '—'}
                   </span>
                   <span className="flex items-center justify-end gap-1 text-muted-foreground">
                     {row.screenshotPath && <ImageIcon className="size-3.5" aria-label="has screenshot" />}

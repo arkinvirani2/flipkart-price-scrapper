@@ -103,6 +103,9 @@ export interface JobRow {
   message?: string;
   screenshotPath?: string;
   finishedAt?: string;
+  /** Per-product settlement inputs, carried straight through from the inputs file. */
+  currentBankSettlement?: number;
+  bankSettlementThreshold?: number;
 }
 
 /* ------------------------------------------------------------------- stats */

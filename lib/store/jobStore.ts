@@ -103,6 +103,8 @@ function buildRecord(manifest: JobManifest, inputs: ScrapeInput[], journal: Jour
       message: result?.message,
       screenshotPath: result?.screenshotPath,
       finishedAt: result?.finishedAt,
+      currentBankSettlement: input.currentBankSettlement,
+      bankSettlementThreshold: input.bankSettlementThreshold,
     };
   });
 

@@ -41,8 +41,10 @@ Then: **New batch** → drop your JSON file → review → **Create batch** → 
 
 ### Workflow
 
-1. **Upload** an array of `{ productUrl, targetSeller, sku, fsn }`. It is validated for
-   required fields, duplicate rows (same sku + URL), invalid URLs, and malformed JSON —
+1. **Upload** an array of `{ productUrl, targetSeller, sku, fsn }`, optionally with
+   `currentBankSettlement` and `bankSettlementThreshold` per product (numbers used only by
+   the Settlement tab — the scraper ignores them; a missing one only warns). It is validated
+   for required fields, duplicate rows (same sku + URL), invalid URLs, and malformed JSON —
    with every problem listed per-row before anything is created. (A file using `skn`
    instead of `fsn` is rejected with a message naming the fix.)
 2. **Dashboard** — nine stat cards (total, pending, running, completed, succeeded, failed,
@@ -57,6 +59,11 @@ Then: **New batch** → drop your JSON file → review → **Create batch** → 
      failure) so a later resume scrapes it cleanly.
 5. **Queue** — virtualized table (handles thousands of rows), with filters for status, SKU,
    FSN, seller, URL, date, duration and failure reason, plus global search.
+   - **Settlement** — three virtualized lists driven by the per-product bank-settlement
+     figures. Difference is `currentPrice − sellerPrice`; `finalBankSettlement =
+     currentBankSettlement + difference`. Rows land in **Main** (final ≥ threshold),
+     **Below threshold** (final < threshold), or **Needs review** (not yet scraped, failed,
+     or missing inputs — each with a reason). Any row opens its Flipkart Seller Hub listing.
 6. **Failed** — reason, failure screenshot (view/download), and per-row or bulk retry.
 7. **Logs** — timestamped, level-coded, searchable, filterable, downloadable.
 8. **Analytics** — outcome, scrape-time distribution, products per hour, failure reasons,

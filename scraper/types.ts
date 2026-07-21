@@ -7,6 +7,13 @@ export interface ScrapeInput {
   targetSeller: string;
   sku: string;
   fsn: string;
+  /**
+   * Per-product bank-settlement figures used only by the dashboard's settlement
+   * view. The scraper reads none of these — they pass through untouched from the
+   * inputs file to the journal-joined rows. Optional so older inputs stay valid.
+   */
+  currentBankSettlement?: number;
+  bankSettlementThreshold?: number;
 }
 
 export type ScrapeStatus =

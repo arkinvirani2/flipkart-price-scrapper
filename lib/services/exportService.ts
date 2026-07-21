@@ -7,12 +7,18 @@
  * hand afterwards.
  */
 
+import { computeSettlement, SETTLEMENT_CATEGORY_LABEL } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
 interface Column {
   header: string;
   width: number;
   value: (row: JobRow) => string | number | null;
+}
+
+/** Round to two decimals for export, keeping null as an empty cell. */
+function round2(value: number | null): number | null {
+  return value === null ? null : Math.round(value * 100) / 100;
 }
 
 const COLUMNS: Column[] = [
@@ -25,7 +31,14 @@ const COLUMNS: Column[] = [
   { header: 'Scrape Status', width: 22, value: (row) => row.result?.status ?? null },
   { header: 'Main Price', width: 12, value: (row) => row.result?.mainPrice ?? null },
   { header: 'Seller Price', width: 12, value: (row) => row.result?.sellerPrice ?? null },
-  { header: 'Difference', width: 12, value: (row) => row.result?.difference ?? null },
+  // Difference here is the dashboard's direction (current − seller), matching the
+  // settlement view and the queue's Diff column, not the journal's stored sign.
+  { header: 'Difference', width: 12, value: (row) => computeSettlement(row).difference },
+  { header: 'Difference %', width: 12, value: (row) => round2(computeSettlement(row).differencePct) },
+  { header: 'Current Bank Settlement', width: 20, value: (row) => row.currentBankSettlement ?? null },
+  { header: 'Bank Settlement Threshold', width: 22, value: (row) => row.bankSettlementThreshold ?? null },
+  { header: 'Final Bank Settlement', width: 20, value: (row) => round2(computeSettlement(row).finalBankSettlement) },
+  { header: 'Settlement List', width: 16, value: (row) => SETTLEMENT_CATEGORY_LABEL[computeSettlement(row).category] },
   {
     header: 'Price Different',
     width: 14,

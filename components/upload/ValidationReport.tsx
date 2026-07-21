@@ -100,6 +100,8 @@ export function ValidationReport({ report }: { report: Report }) {
                   <TableHead>SKU</TableHead>
                   <TableHead>FSN</TableHead>
                   <TableHead>Seller</TableHead>
+                  <TableHead className="text-right">Curr. BS</TableHead>
+                  <TableHead className="text-right">Threshold</TableHead>
                   <TableHead>URL</TableHead>
                 </TableRow>
               </TableHeader>
@@ -110,6 +112,12 @@ export function ValidationReport({ report }: { report: Report }) {
                     <TableCell className="font-medium">{row.sku}</TableCell>
                     <TableCell className="tabular text-muted-foreground">{row.fsn}</TableCell>
                     <TableCell>{row.targetSeller}</TableCell>
+                    <TableCell className="tabular text-right text-muted-foreground">
+                      {row.currentBankSettlement ?? '—'}
+                    </TableCell>
+                    <TableCell className="tabular text-right text-muted-foreground">
+                      {row.bankSettlementThreshold ?? '—'}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">{shortenUrl(row.productUrl, 42)}</TableCell>
                   </TableRow>
                 ))}

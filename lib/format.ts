@@ -56,6 +56,19 @@ export function formatPercent(value: number | null | undefined): string {
   return `${value}%`;
 }
 
+/** Signed percentage at fixed precision, so a small move still reads clearly: `+4.00%`, `-3.75%`. */
+export function formatDifferencePercent(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(digits)}%`;
+}
+
+/** A settlement figure — a plain grouped number, up to two decimals. Not a price, so no ₹. */
+export function formatSettlement(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return value.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const date = new Date(iso);

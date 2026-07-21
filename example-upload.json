@@ -3,12 +3,16 @@
     "productUrl": "https://dl.flipkart.com/s/zBGUsSuuuN",
     "targetSeller": "Previx",
     "sku": "SKU12345",
-    "fsn": "STIHZG79HGFP5EXP"
+    "fsn": "STIHZG79HGFP5EXP",
+    "currentBankSettlement": 100,
+    "bankSettlementThreshold": 100
   },
   {
     "productUrl": "https://dl.flipkart.com/s/7wUZOWNNNN",
     "targetSeller": "Previx",
     "sku": "SKU67890",
-    "fsn": "STIH9DCHWXFCYWNN"
+    "fsn": "STIH9DCHWXFCYWNN",
+    "currentBankSettlement": 120,
+    "bankSettlementThreshold": 120
   }
 ]

@@ -95,6 +95,17 @@ export function validateUpload(text: string): ValidationReport {
 
   const seen = new Map<string, number>();
 
+  // Only nudge about a missing settlement figure when the file uses the feature
+  // at all. A file that opts out entirely shouldn't drown in warnings; a file
+  // that fills some rows but not others almost certainly has a mistake worth flagging.
+  const settlementInUse = parsed.some(
+    (raw) =>
+      typeof raw === 'object' &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      ('currentBankSettlement' in raw || 'bankSettlementThreshold' in raw),
+  );
+
   parsed.forEach((raw, index) => {
     const rowNumber = index + 1;
 
@@ -145,6 +156,23 @@ export function validateUpload(text: string): ValidationReport {
       if (urlIssue.severity === 'error') return;
     }
 
+    // Settlement inputs are optional, so an older file still validates. A missing
+    // value only warns — the row is scraped, then lands in the settlement view's
+    // "Needs review" list with that as its reason. A present-but-non-numeric
+    // value is a real mistake and blocks, since it would silently break the maths.
+    const currentBankSettlement = parseBankField(record, 'currentBankSettlement', rowNumber, settlementInUse);
+    const bankSettlementThreshold = parseBankField(record, 'bankSettlementThreshold', rowNumber, settlementInUse);
+    if (currentBankSettlement.issue) issues.push(currentBankSettlement.issue);
+    if (bankSettlementThreshold.issue) issues.push(bankSettlementThreshold.issue);
+    if (currentBankSettlement.issue?.severity === 'error' || bankSettlementThreshold.issue?.severity === 'error') {
+      return;
+    }
+    const enriched: ScrapeInput = {
+      ...row,
+      currentBankSettlement: currentBankSettlement.value,
+      bankSettlementThreshold: bankSettlementThreshold.value,
+    };
+
     // Duplicate identity is a correctness problem, not a style one: two rows
     // with the same key collapse to a single journal entry, so the second would
     // silently never be scraped.
@@ -161,10 +189,54 @@ export function validateUpload(text: string): ValidationReport {
     }
     seen.set(key, rowNumber);
 
-    rows.push(row);
+    rows.push(enriched);
   });
 
   return report(issues, rows, parsed.length);
+}
+
+/**
+ * Read one optional numeric settlement field off the raw record.
+ *
+ * Accepts a number or a numeric string (Excel-to-JSON exports routinely quote
+ * numbers). Absent → a non-blocking warning; present but not a finite number →
+ * a blocking error.
+ */
+function parseBankField(
+  record: Record<string, unknown>,
+  field: 'currentBankSettlement' | 'bankSettlementThreshold',
+  row: number,
+  warnIfMissing: boolean,
+): { value?: number; issue?: ValidationIssue } {
+  const raw = record[field];
+
+  if (raw === undefined || raw === null || raw === '') {
+    if (!warnIfMissing) return {};
+    return {
+      issue: {
+        severity: 'warning',
+        row,
+        field,
+        code: 'BANK_FIELD_MISSING',
+        message: `${field} is missing — this row can't be settlement-evaluated and will show in the "Needs review" list.`,
+      },
+    };
+  }
+
+  const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isFinite(value)) {
+    return {
+      issue: {
+        severity: 'error',
+        row,
+        field,
+        code: 'BANK_FIELD_INVALID',
+        message: `${field} must be a number, got ${truncate(JSON.stringify(raw))}.`,
+      },
+    };
+  }
+
+  return { value };
 }
 
 function checkUrl(value: string, row: number): ValidationIssue | null {
