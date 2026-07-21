@@ -12,7 +12,7 @@
     "targetSeller": "Previx",
     "sku": "SKU67890",
     "fsn": "STIH9DCHWXFCYWNN",
-    "currentBankSettlement": 120,
+    "currentBankSettlement": 150,
     "bankSettlementThreshold": 120
   }
 ]

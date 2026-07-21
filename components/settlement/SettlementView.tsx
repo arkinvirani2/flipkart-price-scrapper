@@ -1,6 +1,6 @@
 'use client';
 
-import { CircleCheck, CircleHelp, TrendingDown } from 'lucide-react';
+import { CircleCheck, CircleHelp, Equal, TrendingDown } from 'lucide-react';
 import { useMemo } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { EMPTY_FILTERS } from '@/components/queue/FilterBar';
@@ -77,19 +77,21 @@ export function SettlementView({ jobId }: { jobId: string }) {
   const rowsQuery = useJobRows(jobId, EMPTY_FILTERS);
   const rows = rowsQuery.data?.rows;
 
-  const { main, below, review } = useMemo(() => {
+  const { main, below, equal, review } = useMemo(() => {
     const main: SettlementRow[] = [];
     const below: SettlementRow[] = [];
+    const equal: SettlementRow[] = [];
     const review: SettlementRow[] = [];
 
     for (const row of rows ?? []) {
       const entry: SettlementRow = { row, settlement: computeSettlement(row) };
       if (entry.settlement.category === 'main') main.push(entry);
       else if (entry.settlement.category === 'below') below.push(entry);
+      else if (entry.settlement.category === 'equal') equal.push(entry);
       else review.push(entry);
     }
 
-    return { main, below, review };
+    return { main, below, equal, review };
   }, [rows]);
 
   if (rowsQuery.isLoading && !rows) {
@@ -116,6 +118,11 @@ export function SettlementView({ jobId }: { jobId: string }) {
             Below threshold
             <CountBadge value={below.length} />
           </TabsTrigger>
+          <TabsTrigger value="equal">
+            <Equal className="mr-1.5 size-4" />
+            No difference
+            <CountBadge value={equal.length} />
+          </TabsTrigger>
           <TabsTrigger value="review">
             <CircleHelp className="mr-1.5 size-4" />
             Needs review
@@ -131,6 +138,13 @@ export function SettlementView({ jobId }: { jobId: string }) {
         <TabsContent value="below" className="mt-0 space-y-2">
           <p className="text-xs text-muted-foreground">Final bank settlement falls short of the threshold.</p>
           <SettlementTable rows={below} columns={BASE_COLUMNS} emptyMessage="No listings are below their threshold." />
+        </TabsContent>
+
+        <TabsContent value="equal" className="mt-0 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Current price equals seller price, so the difference is 0. Excluded from the main and below-threshold lists.
+          </p>
+          <SettlementTable rows={equal} columns={BASE_COLUMNS} emptyMessage="No listings have a zero difference." />
         </TabsContent>
 
         <TabsContent value="review" className="mt-0 space-y-2">

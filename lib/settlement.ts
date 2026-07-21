@@ -13,8 +13,8 @@
 
 import type { JobRow } from '@/types/dashboard';
 
-/** Which of the three settlement lists a row belongs in. */
-export type SettlementCategory = 'main' | 'below' | 'review';
+/** Which of the settlement lists a row belongs in. */
+export type SettlementCategory = 'main' | 'below' | 'equal' | 'review';
 
 export interface Settlement {
   /** The page's "current" price — the scraper's mainPrice. */
@@ -48,6 +48,7 @@ export function computeSettlement(row: JobRow): Settlement {
   const { category, reason } = categorize(row, {
     currentPrice,
     sellerPrice,
+    difference,
     currentBankSettlement,
     bankSettlementThreshold,
     finalBankSettlement,
@@ -71,6 +72,7 @@ function categorize(
   parts: {
     currentPrice: number | null;
     sellerPrice: number | null;
+    difference: number | null;
     currentBankSettlement: number | null;
     bankSettlementThreshold: number | null;
     finalBankSettlement: number | null;
@@ -85,17 +87,24 @@ function categorize(
   if (parts.currentPrice === null || parts.sellerPrice === null) {
     return { category: 'review', reason: 'Missing price data' };
   }
+  // A zero difference is neither above nor below the threshold — the prices match,
+  // so it gets its own list and is kept out of the main and below-threshold ones.
+  if (parts.difference === 0) {
+    return { category: 'equal', reason: null };
+  }
   if (parts.currentBankSettlement === null || parts.bankSettlementThreshold === null) {
     return { category: 'review', reason: 'Missing bank-settlement values' };
   }
   // finalBankSettlement is guaranteed non-null once both inputs above exist.
   const passes = (parts.finalBankSettlement as number) >= parts.bankSettlementThreshold;
+  
   return { category: passes ? 'main' : 'below', reason: null };
 }
 
 export const SETTLEMENT_CATEGORY_LABEL: Record<SettlementCategory, string> = {
   main: 'Main',
   below: 'Below threshold',
+  equal: 'No difference',
   review: 'Needs review',
 };
 
