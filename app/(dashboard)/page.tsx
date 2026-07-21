@@ -25,7 +25,7 @@ export default function BatchesPage() {
   const interrupted = jobs.filter((job) => job.state === 'interrupted');
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
+    <div className="w-full space-y-6 p-4 xl:p-5">
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Batches</h1>

@@ -53,7 +53,7 @@ export default function JobDetailPage() {
 
   if (detail.isLoading || !manifest || !stats) {
     return (
-      <div className="mx-auto max-w-6xl space-y-4 p-6">
+      <div className="w-full space-y-4 p-4 xl:p-5">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-32 w-full" />
         <Skeleton className="h-96 w-full" />
@@ -63,7 +63,7 @@ export default function JobDetailPage() {
 
   if (detail.isError) {
     return (
-      <div className="mx-auto max-w-6xl p-6">
+      <div className="w-full p-4 xl:p-5">
         <Alert variant="destructive">
           <AlertTitle>Could not load this batch</AlertTitle>
           <AlertDescription>{(detail.error as Error).message}</AlertDescription>
@@ -73,7 +73,7 @@ export default function JobDetailPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 p-6">
+    <div className="w-full space-y-5 p-4 xl:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" asChild>
