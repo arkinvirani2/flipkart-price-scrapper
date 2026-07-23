@@ -1,6 +1,6 @@
 'use client';
 
-import { FileJson, Upload } from 'lucide-react';
+import { FileSpreadsheet, Upload } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -8,9 +8,11 @@ interface Props {
   onFile: (file: File) => void;
   disabled?: boolean;
   filename?: string | null;
+  title?: string;
+  description?: string;
 }
 
-export function UploadDropzone({ onFile, disabled, filename }: Props) {
+export function UploadDropzone({ onFile, disabled, filename, title, description }: Props) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -49,7 +51,7 @@ export function UploadDropzone({ onFile, disabled, filename }: Props) {
       <input
         ref={inputRef}
         type="file"
-        accept="application/json,.json"
+        accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         className="hidden"
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -61,7 +63,7 @@ export function UploadDropzone({ onFile, disabled, filename }: Props) {
 
       {filename ? (
         <>
-          <FileJson className="size-8 text-primary" aria-hidden />
+          <FileSpreadsheet className="size-8 text-primary" aria-hidden />
           <div>
             <p className="text-sm font-medium">{filename}</p>
             <p className="text-xs text-muted-foreground">Click or drop another file to replace it</p>
@@ -71,10 +73,8 @@ export function UploadDropzone({ onFile, disabled, filename }: Props) {
         <>
           <Upload className="size-8 text-muted-foreground" aria-hidden />
           <div>
-            <p className="text-sm font-medium">Drop a JSON file, or click to browse</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              An array of objects with productUrl, targetSeller, sku and fsn
-            </p>
+            <p className="text-sm font-medium">{title ?? 'Drop an XLS or XLSX file, or click to browse'}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{description ?? 'Uses spreadsheet columns for scraping'}</p>
           </div>
         </>
       )}

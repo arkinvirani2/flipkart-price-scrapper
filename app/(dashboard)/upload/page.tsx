@@ -18,17 +18,21 @@ import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
 
 export default function UploadPage() {
   const router = useRouter();
+  const [listingFile, setListingFile] = useState<File | null>(null);
+  const [thresholdFile, setThresholdFile] = useState<File | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [name, setName] = useState('');
+  const [targetSeller, setTargetSeller] = useState('');
   const [options, setOptions] = useState<JobOptions>(DEFAULT_JOB_OPTIONS);
 
   const validate = useMutation({
-    mutationFn: (file: File) => api.validateUpload(file),
+    mutationFn: ({ file, threshold }: { file: File; threshold: File }) =>
+      api.validateUpload(file, threshold, targetSeller.trim()),
     onSuccess: (data) => {
       setFilename(data.filename);
       setReport(data.report);
-      if (!name) setName(data.filename.replace(/\.json$/i, ''));
+      if (!name) setName(data.filename.replace(/\.(xlsx?|json)$/i, ''));
     },
   });
 
@@ -42,15 +46,68 @@ export default function UploadPage() {
       <header>
         <h1 className="text-xl font-semibold">New batch</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Upload a JSON file, review what was found, then start scraping.
+          Upload a seller listing spreadsheet, review what was found, then start scraping.
         </p>
       </header>
 
+      <div className="space-y-2">
+        <Label htmlFor="target-seller">Target seller</Label>
+        <Input
+          id="target-seller"
+          value={targetSeller}
+          onChange={(event) => {
+            setTargetSeller(event.target.value);
+            setFilename(null);
+            setReport(null);
+          }}
+          placeholder="e.g. Anuttar"
+          disabled={validate.isPending || create.isPending}
+        />
+        <p className="text-xs text-muted-foreground">
+          This seller name is added to every row created from the spreadsheet.
+        </p>
+      </div>
+
       <UploadDropzone
-        onFile={(file) => validate.mutate(file)}
-        disabled={validate.isPending || create.isPending}
-        filename={filename}
+        onFile={(file) => {
+          setListingFile(file);
+          setFilename(null);
+          setReport(null);
+        }}
+        disabled={validate.isPending || create.isPending || !targetSeller.trim()}
+        filename={listingFile?.name ?? null}
+        title="Drop seller listing XLS/XLSX, or click to browse"
+        description="Uses Seller SKU Id, Flipkart Serial Number and Bank Settlement"
       />
+
+      <UploadDropzone
+        onFile={(file) => {
+          setThresholdFile(file);
+          setReport(null);
+        }}
+        disabled={validate.isPending || create.isPending || !targetSeller.trim()}
+        filename={thresholdFile?.name ?? null}
+        title="Drop minimum settlement XLS/XLSX, or click to browse"
+        description="Uses FSN and Minimum Bank Settlement price"
+      />
+
+      <Button
+        type="button"
+        onClick={() => {
+          if (!listingFile || !thresholdFile) return;
+          validate.mutate({ file: listingFile, threshold: thresholdFile });
+        }}
+        disabled={
+          validate.isPending ||
+          create.isPending ||
+          !targetSeller.trim() ||
+          !listingFile ||
+          !thresholdFile
+        }
+      >
+        {validate.isPending ? <Loader2 className="animate-spin" /> : <Play />}
+        Validate spreadsheets
+      </Button>
 
       {validate.isPending && (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">

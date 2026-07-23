@@ -28,7 +28,7 @@ npm install            # also runs `playwright install chromium` via postinstall
 
 ## Dashboard
 
-A Next.js control panel over the same scraper: upload a JSON file, review the validation,
+A Next.js control panel over the same scraper: upload a seller listing XLS/XLSX file, review the validation,
 start the batch, watch it live, pause/resume/stop, and export CSV/XLSX — no terminal.
 
 ```bash
@@ -37,16 +37,17 @@ npm run dev            # http://localhost:3000  (development)
 npm run build && npm start   # production
 ```
 
-Then: **New batch** → drop your JSON file → review → **Create batch** → **Start**.
+Then: **New batch** → enter the target seller → drop the seller listing XLS/XLSX → drop the minimum settlement XLS/XLSX → review → **Create batch** → **Start**.
 
 ### Workflow
 
-1. **Upload** an array of `{ productUrl, targetSeller, sku, fsn }`, optionally with
-   `currentBankSettlement` and `bankSettlementThreshold` per product (numbers used only by
-   the Settlement tab — the scraper ignores them; a missing one only warns). It is validated
-   for required fields, duplicate rows (same sku + URL), invalid URLs, and malformed JSON —
-   with every problem listed per-row before anything is created. (A file using `skn`
-   instead of `fsn` is rejected with a message naming the fix.)
+1. **Upload** a seller listing spreadsheet and a minimum settlement spreadsheet. The listing
+   sheet provides `Seller SKU Id`, `Flipkart Serial Number`, and `Bank Settlement`; the
+   minimum settlement sheet provides `FSN` and `Minimum Bank Settlement price`. Matching FSNs
+   fill `bankSettlementThreshold`. `targetSeller` is entered manually on the upload page and
+   applied to every row. The converted rows are validated for required fields, duplicate rows
+   (same sku + URL), invalid URLs, and numeric settlement fields — with every problem listed
+   per-row before anything is created.
 2. **Dashboard** — nine stat cards (total, pending, running, completed, succeeded, failed,
    success %, average time, estimated remaining, queue length).
 3. **Live progress** — current product, step, per-product and batch progress bars,
