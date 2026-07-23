@@ -7,6 +7,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { humanBehavior } from './humanBehavior';
 import { comparePrice } from './parser';
 import {
   checkAvailability,
@@ -165,7 +166,9 @@ async function scrapeOnce(
   options.signal?.addEventListener('abort', abortContext, { once: true });
 
   try {
-    return await scrapeInContext(context, input, options, attempt);
+    // `humanize` only here, not in `scrapeProduct`: idle browsing belongs in the
+    // gap *between* products, and a single-product run has no next product.
+    return await scrapeInContext(context, input, options, attempt, true);
   } catch (error) {
     return failure(input, 'ERROR', errorMessage(error));
   } finally {
@@ -199,6 +202,7 @@ async function scrapeInContext(
   input: ScrapeInput,
   options: ResolvedOptions,
   attempt = 1,
+  humanize = false,
 ): Promise<ScrapeResult> {
   const startedAt = Date.now();
   const page = await context.newPage();
@@ -293,6 +297,14 @@ async function scrapeInContext(
     return { ...failure(input, 'ERROR', errorMessage(error)), ...tail };
   } finally {
     capture?.detach();
+
+    // Idle browsing before this tab goes away. The result above is already
+    // built and returned by this point, so nothing here can change it — it only
+    // fills the handover to the next product with human-looking activity.
+    if (humanize) {
+      await humanBehavior(page, { enabled: options.humanLikeBehavior, signal: options.signal });
+    }
+
     await page.close().catch(() => undefined);
   }
 }

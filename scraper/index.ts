@@ -48,10 +48,11 @@ interface CliArgs {
   blockRetries?: number;
   journal?: string;
   resume: boolean;
+  noHuman: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false };
+  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -76,6 +77,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--block-retries': args.blockRetries = Number(next()); break;
       case '--journal': args.journal = next(); break;
       case '--resume': args.resume = true; break;
+      case '--no-human': args.noHuman = true; break;
       case '--help':
       case '-h':
         printUsage();
@@ -120,6 +122,7 @@ Flipkart seller price comparison
     --block-retries <n>   Back-offs before abandoning the run. Default 3.
     --journal <path>      NDJSON progress log. Default <out> with an .ndjson extension.
     --resume              Skip products already in the journal instead of clearing it.
+    --no-human            Skip the ~0.5-3s of idle mouse/scroll activity between products.
 `);
 }
 
@@ -135,6 +138,7 @@ function toOptions(args: CliArgs): ScraperOptions {
     delayJitterMs: args.jitter,
     blockBackoffMs: args.blockBackoff,
     blockRetries: args.blockRetries,
+    humanLikeBehavior: !args.noHuman,
   };
 }
 

@@ -111,6 +111,15 @@ export interface ScraperOptions {
   blockRetries?: number;
 
   /**
+   * Between products in a batch, spend ~0.5–3s doing idle human things on the
+   * finished page — small curved mouse moves, a short scroll, a hover — before
+   * the next product opens. Purely decorative: it runs after the result has
+   * been computed, changes no page state, and cannot affect extracted data.
+   * Defaults to on; set false to go straight from one product to the next.
+   */
+  humanLikeBehavior?: boolean;
+
+  /**
    * Cancels a batch. Checked between products, and — because a product can sit
    * inside a 20s Playwright wait — also wired to close the active browser
    * context, so aborting takes effect immediately rather than at the next

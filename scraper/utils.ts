@@ -94,6 +94,7 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   delayJitterMs: 400,
   blockBackoffMs: 60_000,
   blockRetries: 3,
+  humanLikeBehavior: true,
 };
 
 export function resolveOptions(options: ScraperOptions = {}): ResolvedOptions {
