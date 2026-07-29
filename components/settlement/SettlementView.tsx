@@ -35,15 +35,16 @@ import { SettlementTable, type SettlementColumn, type SettlementRow } from './Se
 const BASE_COLUMNS: SettlementColumn[] = [
   { key: 'sellerPrice', header: 'My Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.sellerPrice) },
   { key: 'currentPrice', header: 'Flipkart Price', width: 7, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentPrice) },
-  // You hold the buy box when your price is the price Flipkart headlines.
+  // You hold the buy box when the winning seller is you. A dash means the page
+  // never named a winner, which is not the same as No.
   {
     key: 'buybox',
     header: 'Buybox',
     width: 5,
     cell: ({ settlement }) =>
-      settlement.difference === null ? (
+      settlement.hasBuybox === null ? (
         <span className="text-muted-foreground">—</span>
-      ) : settlement.difference === 0 ? (
+      ) : settlement.hasBuybox ? (
         <span className="font-medium">Yes</span>
       ) : (
         <span className="text-muted-foreground">No</span>

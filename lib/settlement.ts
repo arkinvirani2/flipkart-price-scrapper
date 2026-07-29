@@ -11,6 +11,7 @@
  * settlement tab, the queue's diff cell) and on the server (the export builder).
  */
 
+import { sellerNamesMatch } from '@/scraper/parser';
 import type { JobRow } from '@/types/dashboard';
 
 /** Which of the settlement lists a row belongs in. */
@@ -24,6 +25,11 @@ export interface Settlement {
   difference: number | null;
   /** (difference / sellerPrice) × 100. Null when sellerPrice is missing or zero. */
   differencePct: number | null;
+  /**
+   * Do we hold the buy box — is the winning seller our own seller?
+   * Null when the page never told us who is winning, which is not the same as No.
+   */
+  hasBuybox: boolean | null;
   currentBankSettlement: number | null;
   bankSettlementThreshold: number | null;
   /** currentBankSettlement + difference. Null when either input is missing. */
@@ -45,6 +51,11 @@ export function computeSettlement(row: JobRow): Settlement {
   const finalBankSettlement =
     currentBankSettlement !== null && difference !== null ? currentBankSettlement + difference : null;
 
+  // Compared through the scraper's own name matcher, so "Shoppping Dil Se" and
+  // "ShopppingDilSe" are the same seller here as they are during a scrape.
+  const buyboxSellerName = row.result?.buyboxSellerName ?? null;
+  const hasBuybox = buyboxSellerName ? sellerNamesMatch(buyboxSellerName, row.targetSeller) : null;
+
   const { category, reason } = categorize(row, {
     currentPrice,
     sellerPrice,
@@ -59,6 +70,7 @@ export function computeSettlement(row: JobRow): Settlement {
     sellerPrice,
     difference,
     differencePct,
+    hasBuybox,
     currentBankSettlement,
     bankSettlementThreshold,
     finalBankSettlement,

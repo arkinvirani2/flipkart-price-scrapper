@@ -42,13 +42,13 @@ const COLUMNS: Column[] = [
   { header: 'Scrape Status', width: 22, value: (row) => row.result?.status ?? null },
   { header: 'Flipkart Price', width: 14, value: (row) => row.result?.mainPrice ?? null },
   { header: 'My Price', width: 12, value: (row) => row.result?.sellerPrice ?? null },
-  // YES when my price is the price Flipkart headlines — i.e. I hold the buy box.
+  // YES when the winning seller is our own seller. Empty when no winner was read.
   {
     header: 'Buybox',
     width: 10,
     value: (row) => {
-      const difference = computeSettlement(row).difference;
-      return difference === null ? null : difference === 0 ? 'YES' : 'NO';
+      const hasBuybox = computeSettlement(row).hasBuybox;
+      return hasBuybox === null ? null : hasBuybox ? 'YES' : 'NO';
     },
   },
   // Difference here is the dashboard's direction (current − seller), matching the
