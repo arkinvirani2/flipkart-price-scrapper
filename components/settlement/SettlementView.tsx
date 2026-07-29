@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useJobRows } from '@/hooks/useJobRows';
 import {
+  formatDateTime,
   formatDifferencePercent,
   formatDuration,
   formatSettlement,
@@ -38,6 +39,18 @@ const BASE_COLUMNS: SettlementColumn[] = [
   { key: 'seller', header: 'Seller', width: 9, cell: ({ row }) => <span title={row.targetSeller}>{row.targetSeller}</span> },
   { key: 'status', header: 'Status', width: 6, cell: ({ row }) => <RowStatusBadge status={row.status} /> },
   { key: 'duration', header: 'Duration', width: 5, align: 'right', cell: ({ row }) => formatDuration(row.durationMs) },
+  // When the scrape finished — set the moment a row succeeds or fails, so a row
+  // still queued or running shows a dash.
+  {
+    key: 'finishedAt',
+    header: 'Finished At',
+    width: 11,
+    cell: ({ row }) => (
+      <span className="tabular text-muted-foreground" title={row.finishedAt ?? undefined}>
+        {formatDateTime(row.finishedAt)}
+      </span>
+    ),
+  },
   {
     key: 'difference',
     header: 'Difference',

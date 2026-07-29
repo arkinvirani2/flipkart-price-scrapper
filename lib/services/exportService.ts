@@ -13,7 +13,16 @@ import type { JobManifest, JobRow } from '@/types/dashboard';
 interface Column {
   header: string;
   width: number;
-  value: (row: JobRow) => string | number | null;
+  value: (row: JobRow) => string | number | Date | null;
+  /** Excel number format, for columns that are not plain text. */
+  numFmt?: string;
+}
+
+/** A stored timestamp as a real Date, so XLSX gets a sortable date cell. Null when absent or unparseable. */
+function toDate(iso: string | undefined): Date | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 /** Round to two decimals for export, keeping null as an empty cell. */
@@ -51,7 +60,8 @@ const COLUMNS: Column[] = [
   { header: 'Source', width: 10, value: (row) => row.result?.source ?? null },
   { header: 'Duration (ms)', width: 14, value: (row) => row.durationMs ?? null },
   { header: 'Attempts', width: 10, value: (row) => row.attempts ?? null },
-  { header: 'Finished At', width: 22, value: (row) => row.finishedAt ?? null },
+  // Stamped when a row succeeds or fails, so this is the scrape's completion time.
+  { header: 'Finished At', width: 22, value: (row) => toDate(row.finishedAt), numFmt: 'dd/mm/yyyy hh:mm:ss' },
   { header: 'Message', width: 48, value: (row) => row.message ?? null },
   { header: 'Screenshot', width: 30, value: (row) => (row.screenshotPath ? 'yes' : null) },
   { header: 'Product URL', width: 60, value: (row) => row.productUrl },
@@ -72,12 +82,15 @@ export function exportFilename(manifest: JobManifest, extension: string): string
  * text: a seller literally named "=cmd" should never become a formula in
  * someone's Excel.
  */
-function csvCell(value: string | number | null): string {
+function csvCell(value: string | number | Date | null): string {
   if (value === null || value === undefined) return '';
 
   // A number is never a formula, so a negative price stays a negative number
   // rather than becoming the text "'-7". The injection guard is for text only.
   if (typeof value === 'number') return String(value);
+
+  // CSV has no date type, so timestamps stay ISO — unambiguous and sortable as text.
+  if (value instanceof Date) return value.toISOString();
 
   let text = value;
   if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
@@ -128,7 +141,12 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
     views: [{ state: 'frozen', ySplit: 1 }],
   });
 
-  sheet.columns = COLUMNS.map((column) => ({ header: column.header, key: column.header, width: column.width }));
+  sheet.columns = COLUMNS.map((column) => ({
+    header: column.header,
+    key: column.header,
+    width: column.width,
+    ...(column.numFmt ? { style: { numFmt: column.numFmt } } : {}),
+  }));
   sheet.getRow(1).font = { bold: true };
 
   for (const row of rows) {
