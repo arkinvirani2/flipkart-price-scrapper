@@ -1,6 +1,6 @@
 'use client';
 
-import { CircleCheck, CircleHelp, Equal, TrendingDown } from 'lucide-react';
+import { CircleCheck, CircleHelp, Equal, List, TrendingDown } from 'lucide-react';
 import { useMemo } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { EMPTY_FILTERS } from '@/components/queue/FilterBar';
@@ -13,7 +13,7 @@ import {
   formatSettlement,
   formatSignedNumber,
 } from '@/lib/format';
-import { computeSettlement } from '@/lib/settlement';
+import { computeSettlement, SETTLEMENT_CATEGORY_LABEL } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 import { SettlementTable, type SettlementColumn, type SettlementRow } from './SettlementTable';
 
@@ -21,10 +21,12 @@ import { SettlementTable, type SettlementColumn, type SettlementRow } from './Se
  * The settlement view.
  *
  * Reads the same unfiltered rows query the queue tab uses, so the SSE row-patch
- * keeps all three lists live during a run without any extra plumbing. Every row
- * is bucketed once into Main (clears the threshold), Below Threshold (falls
- * short) or Needs Review (can't be evaluated yet), and each bucket renders the
- * same column set — the review list adds a Reason column.
+ * keeps every list live during a run without any extra plumbing. Every row is
+ * bucketed once into Main (clears the threshold), Below Threshold (falls short),
+ * No Difference (prices match) or Needs Review (can't be evaluated yet), and each
+ * bucket renders the same column set — the review list adds a Reason column. The
+ * All list is the unbucketed set, with both a List and a Reason column so the
+ * mixed rows still explain themselves.
  */
 
 const BASE_COLUMNS: SettlementColumn[] = [
@@ -72,11 +74,24 @@ const REASON_COLUMN: SettlementColumn = {
 
 const REVIEW_COLUMNS = [...BASE_COLUMNS, REASON_COLUMN];
 
+/** The bucket a row would land in — only meaningful on the mixed "All" list. */
+const CATEGORY_COLUMN: SettlementColumn = {
+  key: 'category',
+  header: 'List',
+  width: 7,
+  cell: ({ settlement }) => (
+    <span className="text-muted-foreground">{SETTLEMENT_CATEGORY_LABEL[settlement.category]}</span>
+  ),
+};
+
+const ALL_COLUMNS = [...BASE_COLUMNS, CATEGORY_COLUMN, REASON_COLUMN];
+
 export function SettlementView({ jobId }: { jobId: string }) {
   const rowsQuery = useJobRows(jobId, EMPTY_FILTERS);
   const rows = rowsQuery.data?.rows;
 
-  const { main, below, equal, review } = useMemo(() => {
+  const { all, main, below, equal, review } = useMemo(() => {
+    const all: SettlementRow[] = [];
     const main: SettlementRow[] = [];
     const below: SettlementRow[] = [];
     const equal: SettlementRow[] = [];
@@ -84,13 +99,14 @@ export function SettlementView({ jobId }: { jobId: string }) {
 
     for (const row of rows ?? []) {
       const entry: SettlementRow = { row, settlement: computeSettlement(row) };
+      all.push(entry);
       if (entry.settlement.category === 'main') main.push(entry);
       else if (entry.settlement.category === 'below') below.push(entry);
       else if (entry.settlement.category === 'equal') equal.push(entry);
       else review.push(entry);
     }
 
-    return { main, below, equal, review };
+    return { all, main, below, equal, review };
   }, [rows]);
 
   if (rowsQuery.isLoading && !rows) {
@@ -127,6 +143,11 @@ export function SettlementView({ jobId }: { jobId: string }) {
             Needs review
             <CountBadge value={review.length} />
           </TabsTrigger>
+          <TabsTrigger value="all">
+            <List className="mr-1.5 size-4" />
+            All
+            <CountBadge value={all.length} />
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="main" className="mt-0 space-y-2">
@@ -151,6 +172,13 @@ export function SettlementView({ jobId }: { jobId: string }) {
             Can&apos;t be settlement-evaluated — the reason is on each row.
           </p>
           <SettlementTable rows={review} columns={REVIEW_COLUMNS} emptyMessage="Every scraped row could be evaluated." />
+        </TabsContent>
+
+        <TabsContent value="all" className="mt-0 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Every row in the job, in input order — the List column says which of the other tabs it belongs to.
+          </p>
+          <SettlementTable rows={all} columns={ALL_COLUMNS} emptyMessage="No rows in this job yet." />
         </TabsContent>
       </Tabs>
     </div>
