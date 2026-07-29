@@ -8,7 +8,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { humanBehavior } from './humanBehavior';
-import { comparePrice } from './parser';
+import { comparePrice, pickBuyboxSeller } from './parser';
 import {
   checkAvailability,
   findSellerListEntry,
@@ -245,12 +245,16 @@ async function scrapeInContext(
 
     // 5. Find the seller, paging as needed.
     step('finding-seller');
-    const { seller, source, sellersScanned, showMoreClicks } = await getSellerPrice(
+    const { seller, sellers, source, sellersScanned, showMoreClicks } = await getSellerPrice(
       page,
       input.targetSeller,
       capture,
       options,
     );
+
+    // Who holds the buy box. Inferred from the same list we just read, so it
+    // costs no extra page work; null when it cannot be told apart.
+    const buyboxSeller = pickBuyboxSeller(sellers, mainPrice, source === 'dom');
 
     if (!seller) {
       throw new ScrapeError(
@@ -273,6 +277,7 @@ async function scrapeInContext(
       fsn: input.fsn,
       sku: input.sku,
       sellerName: seller.name,
+      buyboxSellerName: buyboxSeller?.name ?? null,
       mainPrice,
       sellerPrice: seller.price,
       difference,
@@ -343,6 +348,7 @@ function failure(input: ScrapeInput, status: ScrapeStatus, message: string): Scr
     fsn: input.fsn,
     sku: input.sku,
     sellerName: null,
+    buyboxSellerName: null,
     mainPrice: null,
     sellerPrice: null,
     difference: null,

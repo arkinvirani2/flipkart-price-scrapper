@@ -302,6 +302,8 @@ async function showMoreIsActionable(page: Page): Promise<boolean> {
 
 export interface SellerSearchResult {
   seller: SellerCard | null;
+  /** Every card seen, in page order — the buy-box winner is inferred from these. */
+  sellers: SellerCard[];
   sellersScanned: number;
   showMoreClicks: number;
 }
@@ -327,7 +329,7 @@ export async function clickShowMoreUntilSellerFound(
     const structuralMatch = findSeller(sellers, targetSeller);
     if (structuralMatch) {
       log.step('Seller found...');
-      return { seller: structuralMatch, sellersScanned: sellers.length, showMoreClicks };
+      return { seller: structuralMatch, sellers, sellersScanned: sellers.length, showMoreClicks };
     }
 
     // Catches the case where the card classes changed and structured extraction
@@ -336,19 +338,19 @@ export async function clickShowMoreUntilSellerFound(
     if (anchored && sellerNamesMatch(anchored.name, targetSeller)) {
       log.step('Seller found...');
       log.warn('matched via text anchor — card selectors may need updating');
-      return { seller: anchored, sellersScanned: Math.max(sellers.length, 1), showMoreClicks };
+      return { seller: anchored, sellers, sellersScanned: Math.max(sellers.length, 1), showMoreClicks };
     }
 
     log.step(`Seller not found... (${sellers.length} sellers scanned)`);
 
     if (!(await showMoreIsActionable(page))) {
       log.info('no "Show More" control remains — seller list is exhausted');
-      return { seller: null, sellersScanned: sellers.length, showMoreClicks };
+      return { seller: null, sellers, sellersScanned: sellers.length, showMoreClicks };
     }
 
     if (showMoreClicks >= options.maxShowMoreClicks) {
       log.warn(`stopping at the ${options.maxShowMoreClicks}-click safety cap with "Show More" still present`);
-      return { seller: null, sellersScanned: sellers.length, showMoreClicks };
+      return { seller: null, sellers, sellersScanned: sellers.length, showMoreClicks };
     }
 
     log.step('Clicking Show More...');
@@ -375,7 +377,7 @@ export async function clickShowMoreUntilSellerFound(
       log.info('no new sellers rendered after "Show More" — treating the list as complete');
       const finalSellers = await extractSellers(page);
       const lateMatch = findSeller(finalSellers, targetSeller);
-      return { seller: lateMatch, sellersScanned: finalSellers.length, showMoreClicks };
+      return { seller: lateMatch, sellers: finalSellers, sellersScanned: finalSellers.length, showMoreClicks };
     }
 
     sellers = grown;
@@ -394,13 +396,26 @@ export async function getSellerPrice(
   targetSeller: string,
   capture: NetworkCapture | null,
   options: ResolvedOptions,
-): Promise<{ seller: SellerCard | null; source: 'network' | 'dom'; sellersScanned: number; showMoreClicks: number }> {
+): Promise<{
+  seller: SellerCard | null;
+  /** Every card the winning path saw. Page-ordered for `dom`, arbitrary for `network`. */
+  sellers: SellerCard[];
+  source: 'network' | 'dom';
+  sellersScanned: number;
+  showMoreClicks: number;
+}> {
   if (capture && options.useNetworkCapture) {
     const networkSellers = sellersFromNetwork(capture);
     const match = findSeller(networkSellers, targetSeller);
     if (match && match.price !== null) {
       log.info(`seller resolved from a captured network payload (${networkSellers.length} sellers)`);
-      return { seller: match, source: 'network', sellersScanned: networkSellers.length, showMoreClicks: 0 };
+      return {
+        seller: match,
+        sellers: networkSellers,
+        source: 'network',
+        sellersScanned: networkSellers.length,
+        showMoreClicks: 0,
+      };
     }
     if (networkSellers.length > 0) {
       log.info(`network payload had ${networkSellers.length} sellers but not the target — falling back to DOM`);
@@ -410,6 +425,7 @@ export async function getSellerPrice(
   const result = await clickShowMoreUntilSellerFound(page, targetSeller, options);
   return {
     seller: result.seller,
+    sellers: result.sellers,
     source: 'dom',
     sellersScanned: result.sellersScanned,
     showMoreClicks: result.showMoreClicks,

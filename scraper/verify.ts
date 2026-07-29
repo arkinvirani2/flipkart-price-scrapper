@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkAvailability, findSellerListEntry, getMainPrice, readProductJsonLd } from './productPage';
 import { extractSellers, findSellerByNameAnchored, showMoreButton } from './sellerDrawer';
-import { comparePrice, findSeller, parsePrice } from './parser';
+import { comparePrice, findSeller, parsePrice, pickBuyboxSeller } from './parser';
 import { resolveOptions, setVerbose } from './utils';
 
 const ROOT = join(__dirname, '..');
@@ -110,6 +110,13 @@ async function main(): Promise<void> {
     check('findSeller case-insensitive', findSeller(sellers, 'malbec')?.price, 135);
     check('findSeller spacing-tolerant', findSeller(sellers, 'Shoppping Dil Se')?.price, 139);
     check('findSeller absent seller', findSeller(sellers, 'AYANSHENTERPRISEE'), null);
+    check('buybox seller = the card priced at the PDP price', pickBuyboxSeller(sellers, 135, true)?.name, 'MALBEC');
+    check(
+      'buybox falls back to the first card when no price matches',
+      pickBuyboxSeller(sellers, 999, true)?.name,
+      'FALAKONLINESTORE',
+    );
+    check('buybox stays null for an unordered (network) list', pickBuyboxSeller(sellers, 999, false), null);
     check('"show more" matched once (not the "Got it" button)', await showMoreButton(page).count(), 1);
     check('"show more" text', (await showMoreButton(page).textContent())?.trim(), 'show more');
 
@@ -131,6 +138,8 @@ async function main(): Promise<void> {
       [200, 200, 158, 161, 136],
     );
     check('findSeller TREVIAA', findSeller(desktop, 'TREVIAA')?.price, 200);
+    // SPN1 and TREVIAA both sit at the ₹200 main price; the page listed SPN1 first.
+    check('buybox winner on a price tie is the first listed', pickBuyboxSeller(desktop, 200, true)?.name, 'SPN1');
     check('no "show more" on this layout', await showMoreButton(page).count(), 0);
     check('TREVIAA vs main price 200', comparePrice(200, findSeller(desktop, 'TREVIAA')!.price), {
       difference: 0,

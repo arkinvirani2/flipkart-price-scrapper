@@ -36,16 +36,27 @@ const COLUMNS: Column[] = [
   { header: 'FSN', width: 20, value: (row) => row.fsn },
   { header: 'Target Seller', width: 22, value: (row) => row.targetSeller },
   { header: 'Matched Seller', width: 22, value: (row) => row.result?.sellerName ?? null },
+  // The seller holding the buy box. Empty for rows scraped before this was captured.
+  { header: 'Winning Seller Name', width: 22, value: (row) => row.result?.buyboxSellerName ?? null },
   { header: 'Status', width: 12, value: (row) => row.status },
   { header: 'Scrape Status', width: 22, value: (row) => row.result?.status ?? null },
-  { header: 'Main Price', width: 12, value: (row) => row.result?.mainPrice ?? null },
-  { header: 'Seller Price', width: 12, value: (row) => row.result?.sellerPrice ?? null },
+  { header: 'Flipkart Price', width: 14, value: (row) => row.result?.mainPrice ?? null },
+  { header: 'My Price', width: 12, value: (row) => row.result?.sellerPrice ?? null },
+  // YES when my price is the price Flipkart headlines — i.e. I hold the buy box.
+  {
+    header: 'Buybox',
+    width: 10,
+    value: (row) => {
+      const difference = computeSettlement(row).difference;
+      return difference === null ? null : difference === 0 ? 'YES' : 'NO';
+    },
+  },
   // Difference here is the dashboard's direction (current − seller), matching the
   // settlement view and the queue's Diff column, not the journal's stored sign.
   { header: 'Difference', width: 12, value: (row) => computeSettlement(row).difference },
   { header: 'Difference %', width: 12, value: (row) => round2(computeSettlement(row).differencePct) },
   { header: 'Current Bank Settlement', width: 20, value: (row) => row.currentBankSettlement ?? null },
-  { header: 'Bank Settlement Threshold', width: 22, value: (row) => row.bankSettlementThreshold ?? null },
+  { header: 'Minimum Bank Settlement', width: 22, value: (row) => row.bankSettlementThreshold ?? null },
   { header: 'Final Bank Settlement', width: 20, value: (row) => round2(computeSettlement(row).finalBankSettlement) },
   { header: 'Settlement List', width: 16, value: (row) => SETTLEMENT_CATEGORY_LABEL[computeSettlement(row).category] },
   // Only the "Needs review" rows carry a reason; everything else exports empty.

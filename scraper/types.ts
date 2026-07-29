@@ -31,6 +31,11 @@ export interface ScrapeResult {
   fsn: string;
   sku: string;
   sellerName: string | null;
+  /**
+   * The seller holding the buy box — the offer the product page headlines.
+   * Optional so journals written before this field existed still parse.
+   */
+  buyboxSellerName?: string | null;
   mainPrice: number | null;
   sellerPrice: number | null;
   /** sellerPrice - mainPrice. Null when either side is missing. */

@@ -87,6 +87,37 @@ export function findSeller(cards: SellerCard[], targetSeller: string): SellerCar
   return exact ?? null;
 }
 
+/**
+ * The seller holding the buy box — whoever's offer the product page headlines.
+ *
+ * Flipkart marks this nowhere in the markup, so it is inferred: the PDP price IS
+ * the buy-box seller's price, which makes the card carrying that exact amount the
+ * winner. A tie (two sellers at the same price, as in the desktop snapshot where
+ * SPN1 and TREVIAA both sit at ₹200) goes to whichever the page listed first,
+ * because that is the one Flipkart itself picked.
+ *
+ * `ordered` says whether the list arrived in the page's own order. When no card
+ * carries the main price we fall back to the first card only in that case —
+ * Flipkart renders the default seller first. A captured network payload is merged
+ * from arbitrary JSON, so its order means nothing and it gets null instead of a
+ * guess: an empty cell is better than a confidently wrong seller name.
+ */
+export function pickBuyboxSeller(
+  cards: SellerCard[],
+  mainPrice: number | null,
+  ordered: boolean,
+): SellerCard | null {
+  if (cards.length === 0) return null;
+
+  if (mainPrice !== null) {
+    const target = round2(mainPrice);
+    const atMainPrice = cards.find((card) => card.price !== null && round2(card.price) === target);
+    if (atMainPrice) return atMainPrice;
+  }
+
+  return ordered ? cards[0] : null;
+}
+
 /* -------------------------------------------------------------- comparison */
 
 export interface PriceComparison {

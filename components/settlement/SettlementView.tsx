@@ -33,10 +33,33 @@ import { SettlementTable, type SettlementColumn, type SettlementRow } from './Se
  */
 
 const BASE_COLUMNS: SettlementColumn[] = [
-  { key: 'sellerPrice', header: 'Seller Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.sellerPrice) },
-  { key: 'currentPrice', header: 'Current Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentPrice) },
+  { key: 'sellerPrice', header: 'My Price', width: 6, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.sellerPrice) },
+  { key: 'currentPrice', header: 'Flipkart Price', width: 7, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentPrice) },
+  // You hold the buy box when your price is the price Flipkart headlines.
+  {
+    key: 'buybox',
+    header: 'Buybox',
+    width: 5,
+    cell: ({ settlement }) =>
+      settlement.difference === null ? (
+        <span className="text-muted-foreground">—</span>
+      ) : settlement.difference === 0 ? (
+        <span className="font-medium">Yes</span>
+      ) : (
+        <span className="text-muted-foreground">No</span>
+      ),
+  },
   { key: 'fsn', header: 'FSN', width: 9, cell: ({ row }) => <span title={row.fsn}>{row.fsn}</span> },
   { key: 'seller', header: 'Seller', width: 9, cell: ({ row }) => <span title={row.targetSeller}>{row.targetSeller}</span> },
+  {
+    key: 'buyboxSeller',
+    header: 'Winning Seller Name',
+    width: 10,
+    cell: ({ row }) => {
+      const winner = row.result?.buyboxSellerName ?? null;
+      return winner ? <span title={winner}>{winner}</span> : <span className="text-muted-foreground">—</span>;
+    },
+  },
   { key: 'status', header: 'Status', width: 6, cell: ({ row }) => <RowStatusBadge status={row.status} /> },
   { key: 'duration', header: 'Duration', width: 5, align: 'right', cell: ({ row }) => formatDuration(row.durationMs) },
   // When the scrape finished — set the moment a row succeeds or fails, so a row
@@ -65,8 +88,8 @@ const BASE_COLUMNS: SettlementColumn[] = [
     align: 'right',
     cell: ({ settlement }) => <span className={signClass(settlement.difference)}>{formatDifferencePercent(settlement.differencePct)}</span>,
   },
-  { key: 'threshold', header: 'Threshold BS', width: 6.5, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.bankSettlementThreshold) },
-  { key: 'currentBs', header: 'Current BS', width: 6.5, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentBankSettlement) },
+  { key: 'threshold', header: 'Minimum Bank Settlement', width: 11.5, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.bankSettlementThreshold) },
+  { key: 'currentBs', header: 'Current Bank Settlement', width: 11.5, align: 'right', cell: ({ settlement }) => formatSettlement(settlement.currentBankSettlement) },
   {
     key: 'finalBs',
     header: 'Final BS',
@@ -131,7 +154,7 @@ export function SettlementView({ jobId }: { jobId: string }) {
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
-        Difference is <span className="font-medium text-foreground">current price − seller price</span>; final bank
+        Difference is <span className="font-medium text-foreground">Flipkart price − my price</span>; final bank
         settlement is <span className="font-medium text-foreground">current bank settlement + difference</span>. Click
         any row to open its listing in Flipkart Seller Hub.
       </p>
