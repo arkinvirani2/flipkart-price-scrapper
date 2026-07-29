@@ -12,6 +12,7 @@ import { comparePrice, pickBuyboxSeller } from './parser';
 import {
   checkAvailability,
   findSellerListEntry,
+  getFulfilledBy,
   getMainPrice,
   openProduct,
   readProductJsonLd,
@@ -238,12 +239,16 @@ async function scrapeInContext(
       throw new ScrapeError('MAIN_PRICE_NOT_FOUND', 'Could not read the product page price.');
     }
 
-    // 4. Into the seller list.
+    // 4. Who the page says is fulfilling this listing — the winning seller.
+    const fulfilledBy = await getFulfilledBy(page);
+    if (fulfilledBy) log.info(`fulfilled by: ${fulfilledBy}`);
+
+    // 5. Into the seller list.
     step('opening-sellers');
     const entry = await findSellerListEntry(page, jsonLd, input.productUrl);
     await openSellerDrawer(page, entry, options);
 
-    // 5. Find the seller, paging as needed.
+    // 6. Find the seller, paging as needed.
     step('finding-seller');
     const { seller, sellers, source, sellersScanned, showMoreClicks } = await getSellerPrice(
       page,
@@ -252,9 +257,10 @@ async function scrapeInContext(
       options,
     );
 
-    // Who holds the buy box. Inferred from the same list we just read, so it
-    // costs no extra page work; null when it cannot be told apart.
-    const buyboxSeller = pickBuyboxSeller(sellers, mainPrice, source === 'dom');
+    // Who holds the buy box. The PDP's "Fulfilled by" line states it outright, so
+    // that wins; inferring it from the seller list is only the fallback for pages
+    // that carry no such line.
+    const buyboxSellerName = fulfilledBy ?? pickBuyboxSeller(sellers, mainPrice, source === 'dom')?.name ?? null;
 
     if (!seller) {
       throw new ScrapeError(
@@ -277,7 +283,7 @@ async function scrapeInContext(
       fsn: input.fsn,
       sku: input.sku,
       sellerName: seller.name,
-      buyboxSellerName: buyboxSeller?.name ?? null,
+      buyboxSellerName,
       mainPrice,
       sellerPrice: seller.price,
       difference,

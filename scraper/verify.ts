@@ -17,7 +17,13 @@ import { chromium } from 'playwright';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { checkAvailability, findSellerListEntry, getMainPrice, readProductJsonLd } from './productPage';
+import {
+  checkAvailability,
+  findSellerListEntry,
+  getFulfilledBy,
+  getMainPrice,
+  readProductJsonLd,
+} from './productPage';
 import { extractSellers, findSellerByNameAnchored, showMoreButton } from './sellerDrawer';
 import { comparePrice, findSeller, parsePrice, pickBuyboxSeller } from './parser';
 import { resolveOptions, setVerbose } from './utils';
@@ -86,6 +92,8 @@ async function main(): Promise<void> {
     check('getMainPrice via JSON-LD', await getMainPrice(page, jsonLd, options), 236);
     // Must be 236, NOT the 265 sponsored-carousel price that precedes the <h1>.
     check('getMainPrice fallback ignores ad carousel', await getMainPrice(page, null, options), 236);
+    // The PDP's delivery block reads "Fulfilled by Hcom" — this is the winning seller.
+    check('getFulfilledBy', await getFulfilledBy(page), 'Hcom');
 
     const entry = await findSellerListEntry(page, jsonLd, 'https://www.flipkart.com/x/p/itm?pid=KMTHGNNHMYWQHJN7');
     check('"See other sellers" located', entry.link !== null, true);

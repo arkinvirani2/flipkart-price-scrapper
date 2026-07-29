@@ -7,6 +7,7 @@ import type { Locator, Page } from 'playwright';
 import {
   BLOCKED_STATUSES,
   BLOCKED_TEXT,
+  FULFILLED_BY_PATTERN_SOURCE,
   JSON_LD,
   MAIN_PRICE,
   PRICE_PATTERN_SOURCE,
@@ -220,6 +221,36 @@ async function priceAnchoredToTitle(page: Page): Promise<number | null> {
     .catch(() => null);
 
   return parsePrice(raw);
+}
+
+/* ------------------------------------------------------------- fulfilled by */
+
+/**
+ * Read the PDP's "Fulfilled by <name>" line — the seller whose offer the page is
+ * currently showing.
+ *
+ * Text-anchored rather than class-anchored: the line lives under generated
+ * atomic classes that churn, but the copy itself is stable. Leaf nodes only, so
+ * an ancestor wrapping the whole delivery block cannot match with its
+ * concatenated text. Returns null when the page carries no such line.
+ */
+export async function getFulfilledBy(page: Page): Promise<string | null> {
+  const raw = await page
+    .evaluate((pattern: string) => {
+      const re = new RegExp(pattern, 'i');
+
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>('div, span, p, li'))) {
+        if (el.children.length > 0) continue;
+        const text = (el.textContent ?? '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+        const match = re.exec(text);
+        if (match?.[1]) return match[1];
+      }
+      return null;
+    }, FULFILLED_BY_PATTERN_SOURCE)
+    .catch(() => null);
+
+  const name = raw?.trim();
+  return name ? name : null;
 }
 
 /* --------------------------------------------------- seller list entry point */

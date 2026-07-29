@@ -113,6 +113,15 @@ export const LOGIN_MODAL_CLOSE = [
   'span[role="button"]:has-text("✕")',
 ] as const;
 
+/**
+ * The PDP's "Fulfilled by <name>" line — on the captured page, "Fulfilled by
+ * Hcom". It sits in the delivery block under hashed atomic classes, so it is
+ * matched on its own text; capture group 1 is the fulfilling seller's name.
+ * Anchored at both ends so it only ever matches the leaf node that is exactly
+ * this line, never a paragraph that happens to contain it.
+ */
+export const FULFILLED_BY_PATTERN_SOURCE = '^fulfill?ed\\s+by\\s*[:-]?\\s*(.+)$';
+
 /** Out-of-stock / unavailable markers. */
 export const UNAVAILABLE_TEXT =
   /(currently unavailable|sold out|out of stock|this item is not available)/i;
