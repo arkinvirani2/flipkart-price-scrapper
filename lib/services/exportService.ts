@@ -7,7 +7,7 @@
  * hand afterwards.
  */
 
-import { computeSettlement, SETTLEMENT_CATEGORY_LABEL } from '@/lib/settlement';
+import { computeSettlement, SETTLEMENT_CATEGORY_LABEL, sellerListingUrl } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
 interface Column {
@@ -76,6 +76,9 @@ const COLUMNS: Column[] = [
   { header: 'Message', width: 48, value: (row) => row.message ?? null },
   { header: 'Screenshot', width: 30, value: (row) => (row.screenshotPath ? 'yes' : null) },
   { header: 'Product URL', width: 60, value: (row) => row.productUrl },
+  // The Seller Hub listing deep link a settlement row opens when clicked, so the
+  // export lands on the same page the dashboard does. Empty without an FSN.
+  { header: 'Seller Link', width: 60, value: (row) => (row.fsn ? sellerListingUrl(row.fsn) : null) },
 ];
 
 export function exportFilename(manifest: JobManifest, extension: string): string {
