@@ -39,6 +39,8 @@ const COLUMNS: Column[] = [
   { header: 'Bank Settlement Threshold', width: 22, value: (row) => row.bankSettlementThreshold ?? null },
   { header: 'Final Bank Settlement', width: 20, value: (row) => round2(computeSettlement(row).finalBankSettlement) },
   { header: 'Settlement List', width: 16, value: (row) => SETTLEMENT_CATEGORY_LABEL[computeSettlement(row).category] },
+  // Only the "Needs review" rows carry a reason; everything else exports empty.
+  { header: 'Settlement Reason', width: 24, value: (row) => computeSettlement(row).reason },
   {
     header: 'Price Different',
     width: 14,

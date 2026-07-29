@@ -1,11 +1,13 @@
 'use client';
 
-import { CircleCheck, CircleHelp, Equal, List, TrendingDown } from 'lucide-react';
+import { CircleCheck, CircleHelp, Equal, FileSpreadsheet, List, TrendingDown } from 'lucide-react';
 import { useMemo } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { EMPTY_FILTERS } from '@/components/queue/FilterBar';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useJobRows } from '@/hooks/useJobRows';
 import {
   formatDifferencePercent,
@@ -175,9 +177,26 @@ export function SettlementView({ jobId }: { jobId: string }) {
         </TabsContent>
 
         <TabsContent value="all" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            Every row in the job, in input order — the List column says which of the other tabs it belongs to.
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              Every row in the job, in input order — the List column says which of the other tabs it belongs to.
+            </p>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" asChild>
+                  {/* No filter params: the export endpoint's unfiltered response is
+                      exactly this list, so the file always matches the tab. */}
+                  <a href={`/api/jobs/${jobId}/export?format=xlsx`} download>
+                    <FileSpreadsheet /> XLSX
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Downloads all {all.length} row{all.length === 1 ? '' : 's'} as an Excel workbook, with the settlement
+                columns and every scraper field.
+              </TooltipContent>
+            </Tooltip>
+          </div>
           <SettlementTable rows={all} columns={ALL_COLUMNS} emptyMessage="No rows in this job yet." />
         </TabsContent>
       </Tabs>
