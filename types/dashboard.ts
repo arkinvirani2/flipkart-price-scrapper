@@ -64,6 +64,21 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   headed: false,
 };
 
+/**
+ * How many SKUs landed in each recommendation bucket.
+ *
+ * Stored on the manifest so the dashboard can show an upload's headline figures
+ * without opening its recommendations file.
+ */
+export interface RecommendationCounts {
+  total: number;
+  priceChange: number;
+  alreadyCorrect: number;
+  settlementUnsafe: number;
+  buyboxWon: number;
+  needsReview: number;
+}
+
 /** Persisted as job.json. The durable description of a batch. */
 export interface JobManifest {
   id: string;
@@ -76,6 +91,20 @@ export interface JobManifest {
   options: JobOptions;
   /** Set when recovery finds the job was interrupted mid-run. */
   interruptedAt?: string;
+
+  /**
+   * The Flipkart account this upload belongs to — the seller name applied to
+   * every row. History is read account-wise, so this is what partitions it.
+   * Optional because jobs created before accounts existed have none; those are
+   * backfilled from the rows' target seller on load.
+   */
+  accountName?: string;
+  /** When the spreadsheet was uploaded. Mirrors `createdAt` for older jobs. */
+  uploadTime?: string;
+  /** Filled in once recommendations have been generated for this job. */
+  recommendationCounts?: RecommendationCounts;
+  recommendationSummary?: string;
+  recommendationsGeneratedAt?: string;
 }
 
 /**

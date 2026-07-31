@@ -1,7 +1,16 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ArrowRight, Inbox, Loader2, Trash2, Upload } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  Building2,
+  Inbox,
+  Lightbulb,
+  Loader2,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { JobStateBadge } from '@/components/dashboard/StatusBadge';
@@ -28,7 +37,7 @@ export default function BatchesPage() {
 
   const jobs = data?.jobs ?? [];
   const interrupted = jobs.filter((job) => job.state === 'interrupted');
-  const groupedJobs = useMemo(() => groupJobsByDate(jobs), [jobs]);
+  const groupedJobs = useMemo(() => groupJobsByAccount(jobs), [jobs]);
 
   const deleteBatch = useMutation({
     mutationFn: api.deleteJob,
@@ -41,9 +50,10 @@ export default function BatchesPage() {
     <div className="w-full space-y-6 p-4 xl:p-5">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Batches</h1>
+          <h1 className="text-xl font-semibold">Uploads</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {jobs.length} batch{jobs.length === 1 ? '' : 'es'}
+            {jobs.length} upload{jobs.length === 1 ? '' : 's'} across {groupedJobs.length} account
+            {groupedJobs.length === 1 ? '' : 's'}
             {data?.activeJobId ? ' — one running now' : ''}
           </p>
         </div>
@@ -118,10 +128,11 @@ export default function BatchesPage() {
           {groupedJobs.map((group) => (
             <section key={group.key} className="space-y-3">
               <div className="flex items-center gap-3">
+                <Building2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 <h2 className="text-sm font-semibold">{group.label}</h2>
                 <span className="h-px flex-1 bg-border" />
                 <span className="text-xs text-muted-foreground">
-                  {group.jobs.length} batch{group.jobs.length === 1 ? '' : 'es'}
+                  {group.jobs.length} upload{group.jobs.length === 1 ? '' : 's'}
                 </span>
               </div>
 
@@ -171,7 +182,14 @@ function BatchRow({
               <JobStateBadge state={job.state} />
               {live && <Loader2 className="size-3.5 animate-spin text-status-running" />}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">Created {formatDateTime(job.createdAt)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Uploaded {formatDateTime(job.uploadTime ?? job.createdAt)}
+            </p>
+            {job.recommendationSummary && (
+              <p className="mt-1 truncate text-xs text-muted-foreground" title={job.recommendationSummary}>
+                {job.recommendationSummary}
+              </p>
+            )}
           </div>
 
           <dl className="flex shrink-0 gap-6 text-sm">
@@ -195,7 +213,16 @@ function BatchRow({
         </div>
       </Link>
 
-      <div className="flex items-start border-l p-2">
+      <div className="flex flex-col items-start gap-1 border-l p-2">
+        {/* Only offered once something has been scraped — there is nothing to
+            recommend from an untouched queue. */}
+        {job.stats.completed > 0 && (
+          <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground" asChild>
+            <Link href={`/recommendations/${job.id}`} aria-label={`Recommendations for ${job.name}`} title="Recommendations">
+              <Lightbulb />
+            </Link>
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -222,16 +249,25 @@ function Stat({ label, value, className }: { label: string; value: string | numb
   );
 }
 
-function groupJobsByDate(jobs: JobSummary[]): { key: string; label: string; jobs: JobSummary[] }[] {
-  const sorted = [...jobs].sort((left, right) => {
-    return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
-  });
+/**
+ * Uploads grouped by Flipkart account, newest upload first within each account.
+ *
+ * Accounts are the unit the recommendation system works in — history is read
+ * account-wise and never crosses between them — so the list is organised the
+ * same way. Jobs from before accounts existed fall into "Unassigned account"
+ * rather than disappearing.
+ */
+function groupJobsByAccount(jobs: JobSummary[]): { key: string; label: string; jobs: JobSummary[] }[] {
+  const uploadedAt = (job: JobSummary) => job.uploadTime ?? job.createdAt;
+
+  const sorted = [...jobs].sort((left, right) => uploadedAt(right).localeCompare(uploadedAt(left)));
   const groups = new Map<string, { key: string; label: string; jobs: JobSummary[] }>();
 
   for (const job of sorted) {
-    const date = new Date(job.createdAt);
-    const validDate = Number.isNaN(date.getTime()) ? new Date(0) : date;
-    const key = validDate.toISOString().slice(0, 10);
+    const name = job.accountName?.trim() || '';
+    // Case and spacing are ignored when grouping, for the same reason the
+    // scraper ignores them when matching a seller name on the page.
+    const key = name.toLowerCase().replace(/\s+/g, '') || '__unassigned';
     const existing = groups.get(key);
 
     if (existing) {
@@ -239,15 +275,7 @@ function groupJobsByDate(jobs: JobSummary[]): { key: string; label: string; jobs
       continue;
     }
 
-    groups.set(key, {
-      key,
-      label: validDate.toLocaleDateString('en-IN', {
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-      }),
-      jobs: [job],
-    });
+    groups.set(key, { key, label: name || 'Unassigned account', jobs: [job] });
   }
 
   return Array.from(groups.values());

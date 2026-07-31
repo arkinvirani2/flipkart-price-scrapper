@@ -38,6 +38,7 @@ import {
   setJobState,
   setRowStatus,
 } from '@/lib/store/jobStore';
+import { generateRecommendations } from '@/lib/services/recommendations';
 import { appendLog } from '@/lib/store/logStore';
 import { jobPaths } from '@/lib/store/paths';
 import type { JobState, LiveProgress, LogLevel } from '@/types/dashboard';
@@ -293,6 +294,22 @@ export class JobRunner {
       this.log(jobId, 'error', `Run ended early with ${stats.pending} product(s) left — most likely a persistent block. Resume to continue.`);
     } else {
       this.log(jobId, 'step', `Run ${next}: ${stats.succeeded} OK, ${stats.failed} failed, ${stats.pending} pending.`);
+    }
+
+    // Recommendations are generated here, once, at the end of a run — never when
+    // the page is viewed. A resumed run ends here too, so the saved file always
+    // reflects everything that has actually been scraped.
+    if (stats.completed > 0) {
+      try {
+        const file = generateRecommendations(jobId);
+        if (file) this.log(jobId, 'step', `Recommendations ready — ${file.summary}`);
+      } catch (error) {
+        this.log(
+          jobId,
+          'warn',
+          `Could not generate recommendations: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     run.progress = null;

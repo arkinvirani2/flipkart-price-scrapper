@@ -7,13 +7,17 @@
  * hand afterwards.
  */
 
+// Type-only, so exceljs itself is still loaded lazily by the two writers below.
+import type { Workbook } from 'exceljs';
+import { RULE_LABEL, type Recommendation } from '@/lib/recommendation';
 import { computeSettlement, SETTLEMENT_CATEGORY_LABEL, sellerListingUrl } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
-interface Column {
+/** Generic over the row type so the queue and the recommendations share one writer. */
+interface Column<T = JobRow> {
   header: string;
   width: number;
-  value: (row: JobRow) => string | number | Date | null;
+  value: (row: T) => string | number | Date | null;
   /** Excel number format, for columns that are not plain text. */
   numFmt?: string;
 }
@@ -81,10 +85,10 @@ const COLUMNS: Column[] = [
   { header: 'Seller Link', width: 60, value: (row) => (row.fsn ? sellerListingUrl(row.fsn) : null) },
 ];
 
-export function exportFilename(manifest: JobManifest, extension: string): string {
+export function exportFilename(manifest: JobManifest, extension: string, suffix?: string): string {
   const safe = manifest.name.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
   const stamp = manifest.createdAt.slice(0, 10);
-  return `${safe || manifest.id}-${stamp}.${extension}`;
+  return `${safe || manifest.id}${suffix ? `-${suffix}` : ''}-${stamp}.${extension}`;
 }
 
 /* --------------------------------------------------------------------- CSV */
@@ -114,18 +118,22 @@ function csvCell(value: string | number | Date | null): string {
 }
 
 /** Generate CSV incrementally so a large batch never sits in memory as one string. */
-export function* csvLines(rows: JobRow[]): Generator<string> {
+export function* csvLinesFor<T>(rows: T[], columns: Column<T>[]): Generator<string> {
   // BOM so Excel opens UTF-8 (₹, seller names) correctly instead of as mojibake.
-  yield `﻿${COLUMNS.map((column) => csvCell(column.header)).join(',')}\r\n`;
+  yield `﻿${columns.map((column) => csvCell(column.header)).join(',')}\r\n`;
 
   for (const row of rows) {
-    yield `${COLUMNS.map((column) => csvCell(column.value(row))).join(',')}\r\n`;
+    yield `${columns.map((column) => csvCell(column.value(row))).join(',')}\r\n`;
   }
 }
 
-export function csvStream(rows: JobRow[]): ReadableStream<Uint8Array> {
+export function* csvLines(rows: JobRow[]): Generator<string> {
+  yield* csvLinesFor(rows, COLUMNS);
+}
+
+function streamFor<T>(rows: T[], columns: Column<T>[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-  const iterator = csvLines(rows);
+  const iterator = csvLinesFor(rows, columns);
 
   return new ReadableStream({
     pull(controller) {
@@ -136,6 +144,10 @@ export function csvStream(rows: JobRow[]): ReadableStream<Uint8Array> {
   });
 }
 
+export function csvStream(rows: JobRow[]): ReadableStream<Uint8Array> {
+  return streamFor(rows, COLUMNS);
+}
+
 /* -------------------------------------------------------------------- XLSX */
 
 /**
@@ -144,18 +156,15 @@ export function csvStream(rows: JobRow[]): ReadableStream<Uint8Array> {
  * exceljs is imported lazily: it is a heavy dependency and only this one route
  * needs it, so loading it at module scope would tax every other request.
  */
-export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise<Buffer> {
-  const ExcelJS = await import('exceljs');
-  const workbook = new ExcelJS.Workbook();
+/**
+ * One worksheet, written the way every sheet in this app is written: bold frozen
+ * header, real column widths, and an autofilter over the populated range so the
+ * file is usable the instant it opens.
+ */
+function addSheet<T>(workbook: Workbook, name: string, columns: Column<T>[], rows: T[]): void {
+  const sheet = workbook.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
 
-  workbook.creator = 'Flipkart Scraper Dashboard';
-  workbook.created = new Date(manifest.createdAt);
-
-  const sheet = workbook.addWorksheet('Results', {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
-
-  sheet.columns = COLUMNS.map((column) => ({
+  sheet.columns = columns.map((column) => ({
     header: column.header,
     key: column.header,
     width: column.width,
@@ -164,14 +173,23 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
   sheet.getRow(1).font = { bold: true };
 
   for (const row of rows) {
-    sheet.addRow(COLUMNS.map((column) => column.value(row)));
+    sheet.addRow(columns.map((column) => column.value(row)));
   }
 
-  // Autofilter over the populated range so the file is usable the moment it opens.
   sheet.autoFilter = {
     from: { row: 1, column: 1 },
-    to: { row: rows.length + 1, column: COLUMNS.length },
+    to: { row: rows.length + 1, column: columns.length },
   };
+}
+
+export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise<Buffer> {
+  const ExcelJS = await import('exceljs');
+  const workbook = new ExcelJS.Workbook();
+
+  workbook.creator = 'Flipkart Scraper Dashboard';
+  workbook.created = new Date(manifest.createdAt);
+
+  addSheet(workbook, 'Results', COLUMNS, rows);
 
   const summary = workbook.addWorksheet('Summary');
   const succeeded = rows.filter((row) => row.result?.status === 'OK').length;
@@ -195,6 +213,79 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
     ['Failed', failed],
     ['Still pending', rows.length - succeeded - failed],
     ['Delay between products (ms)', manifest.options.delayMs],
+  ]);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer);
+}
+
+/* ---------------------------------------------------------- recommendations */
+
+/**
+ * The recommendation export.
+ *
+ * Only the Price Change list is ever exported — it is the actionable one, and a
+ * sheet that also carried the rows needing no change would be a to-do list with
+ * the work already hidden in it. The columns mirror the detail modal, so what
+ * the user saw on screen is what lands in the file.
+ */
+const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
+  { header: 'Index', width: 8, value: (item) => item.index + 1 },
+  { header: 'SKU', width: 18, value: (item) => item.sku },
+  { header: 'FSN', width: 20, value: (item) => item.fsn },
+  { header: 'Account', width: 20, value: (item) => item.accountName },
+  { header: 'Current Price', width: 14, value: (item) => item.currentPrice },
+  { header: 'Winner Price', width: 14, value: (item) => item.winnerPrice },
+  { header: 'Winning Seller', width: 22, value: (item) => item.winningSeller },
+  { header: 'Recommended Price', width: 18, value: (item) => item.recommendedPrice },
+  { header: 'Price Change', width: 14, value: (item) => item.priceDelta },
+  { header: 'Current Settlement', width: 18, value: (item) => round2(item.currentSettlement) },
+  { header: 'Minimum Settlement', width: 19, value: (item) => round2(item.minSettlement) },
+  { header: 'Projected Settlement', width: 20, value: (item) => round2(item.projectedSettlement) },
+  {
+    header: 'Buybox',
+    width: 10,
+    value: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'YES' : 'NO'),
+  },
+  { header: 'Rule Applied', width: 42, value: (item) => RULE_LABEL[item.rule] },
+  { header: 'Reason', width: 60, value: (item) => item.reason },
+  { header: 'Previous Uploads', width: 17, value: (item) => item.history.uploads },
+  { header: 'Buy Box Wins', width: 14, value: (item) => item.history.buyboxWins },
+  { header: 'Product URL', width: 60, value: (item) => item.productUrl },
+  { header: 'Seller Link', width: 60, value: (item) => (item.fsn ? sellerListingUrl(item.fsn) : null) },
+];
+
+export function recommendationCsvStream(rows: Recommendation[]): ReadableStream<Uint8Array> {
+  return streamFor(rows, RECOMMENDATION_COLUMNS);
+}
+
+export async function recommendationXlsxBuffer(
+  manifest: JobManifest,
+  rows: Recommendation[],
+  meta: { accountName: string; uploadTime: string; generatedAt: string; summary: string },
+): Promise<Buffer> {
+  const ExcelJS = await import('exceljs');
+  const workbook = new ExcelJS.Workbook();
+
+  workbook.creator = 'Flipkart Scraper Dashboard';
+  workbook.created = new Date(manifest.createdAt);
+
+  addSheet(workbook, 'Price Change', RECOMMENDATION_COLUMNS, rows);
+
+  const summary = workbook.addWorksheet('Summary');
+  summary.columns = [
+    { header: 'Field', key: 'field', width: 24 },
+    { header: 'Value', key: 'value', width: 60 },
+  ];
+  summary.getRow(1).font = { bold: true };
+  summary.addRows([
+    ['Account', meta.accountName],
+    ['Upload', manifest.name],
+    ['Job ID', manifest.id],
+    ['Upload time', meta.uploadTime],
+    ['Recommendations generated', meta.generatedAt],
+    ['Price changes exported', rows.length],
+    ['Overall', meta.summary],
   ]);
 
   const buffer = await workbook.xlsx.writeBuffer();

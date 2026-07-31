@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { ArrowLeft, Lightbulb, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
@@ -91,6 +91,15 @@ export default function JobDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Recommendations exist once anything has been scraped; they are
+              generated when the run ends, so this is a link, not an action. */}
+          {stats.completed > 0 && (
+            <Button variant="outline" size="sm" asChild>
+              <Link href={`/recommendations/${jobId}`}>
+                <Lightbulb /> Recommendations
+              </Link>
+            </Button>
+          )}
           <ControlBar jobId={jobId} state={state} stats={stats} blockedBy={blockedBy} onError={setBanner} />
           {!isRunning && (
             <Button

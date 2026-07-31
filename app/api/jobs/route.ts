@@ -25,7 +25,7 @@ export async function GET() {
 export async function POST(request: Request) {
   ensureRecovered();
 
-  let body: { name?: string; rows?: unknown; options?: Partial<JobOptions> };
+  let body: { name?: string; accountName?: string; rows?: unknown; options?: Partial<JobOptions> };
   try {
     body = await request.json();
   } catch {
@@ -41,7 +41,10 @@ export async function POST(request: Request) {
 
   const options: JobOptions = { ...DEFAULT_JOB_OPTIONS, ...(body.options ?? {}) };
   const name = (body.name ?? '').trim() || `Batch of ${report.rows.length}`;
-  const manifest = createJob(name, report.rows, options);
+  // The account defaults to the seller name the rows already carry, so a client
+  // that does not send one still lands in the right history.
+  const accountName = (body.accountName ?? '').trim() || report.rows[0]?.targetSeller || '';
+  const manifest = createJob(name, report.rows, options, accountName);
 
   return NextResponse.json({ job: manifest, stats: computeStats(manifest.id) }, { status: 201 });
 }

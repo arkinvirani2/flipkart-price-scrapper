@@ -1,9 +1,16 @@
 'use client';
 
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Loader2, Play } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { UploadDropzone } from '@/components/upload/UploadDropzone';
 import { ValidationReport } from '@/components/upload/ValidationReport';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -16,6 +23,9 @@ import { api } from '@/lib/api';
 import { DEFAULT_JOB_OPTIONS, type JobOptions } from '@/types/dashboard';
 import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
 
+/** Sentinel for the "add an account" option — never a real account name. */
+const NEW_ACCOUNT = '__new__';
+
 export default function UploadPage() {
   const router = useRouter();
   const [listingFile, setListingFile] = useState<File | null>(null);
@@ -25,6 +35,19 @@ export default function UploadPage() {
   const [name, setName] = useState('');
   const [targetSeller, setTargetSeller] = useState('');
   const [options, setOptions] = useState<JobOptions>(DEFAULT_JOB_OPTIONS);
+
+  // Accounts are derived from the uploads that already exist, so the list is
+  // whatever has been used before plus whatever is typed next.
+  const accounts = useQuery({ queryKey: ['accounts'], queryFn: api.listAccounts });
+  const known = accounts.data?.accounts ?? [];
+  const [addingAccount, setAddingAccount] = useState(false);
+  const usingNewAccount = addingAccount || known.length === 0;
+
+  /** Clears anything derived from the previous account or file. */
+  function resetReport() {
+    setFilename(null);
+    setReport(null);
+  }
 
   const validate = useMutation({
     mutationFn: ({ file, threshold }: { file: File; threshold: File }) =>
@@ -37,7 +60,13 @@ export default function UploadPage() {
   });
 
   const create = useMutation({
-    mutationFn: () => api.createJob({ name, rows: report?.rows ?? [], options }),
+    mutationFn: () =>
+      api.createJob({
+        name,
+        accountName: targetSeller.trim(),
+        rows: report?.rows ?? [],
+        options,
+      }),
     onSuccess: ({ job }) => router.push(`/jobs/${job.id}`),
   });
 
@@ -46,25 +75,78 @@ export default function UploadPage() {
       <header>
         <h1 className="text-xl font-semibold">New batch</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Upload a seller listing spreadsheet, review what was found, then start scraping.
+          Pick the Flipkart account, upload its spreadsheets, review what was found, then start
+          scraping.
         </p>
       </header>
 
       <div className="space-y-2">
-        <Label htmlFor="target-seller">Target seller</Label>
-        <Input
-          id="target-seller"
-          value={targetSeller}
-          onChange={(event) => {
-            setTargetSeller(event.target.value);
-            setFilename(null);
-            setReport(null);
-          }}
-          placeholder="e.g. Anuttar"
-          disabled={validate.isPending || create.isPending}
-        />
+        <Label htmlFor="target-seller">Flipkart account</Label>
+
+        {usingNewAccount ? (
+          <div className="flex gap-2">
+            <Input
+              id="target-seller"
+              value={targetSeller}
+              onChange={(event) => {
+                setTargetSeller(event.target.value);
+                // Pins the field open: the accounts query can resolve mid-typing
+                // on a first run, and swapping to a dropdown under the cursor
+                // would throw away what was being typed.
+                setAddingAccount(true);
+                resetReport();
+              }}
+              placeholder="e.g. Anuttar"
+              disabled={validate.isPending || create.isPending}
+            />
+            {known.length > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setAddingAccount(false);
+                  setTargetSeller('');
+                  resetReport();
+                }}
+                disabled={validate.isPending || create.isPending}
+              >
+                Cancel
+              </Button>
+            )}
+          </div>
+        ) : (
+          <Select
+            value={targetSeller}
+            onValueChange={(value) => {
+              // A sentinel rather than an empty value: Radix reserves the empty
+              // string for "nothing selected".
+              if (value === NEW_ACCOUNT) {
+                setAddingAccount(true);
+                setTargetSeller('');
+              } else {
+                setTargetSeller(value);
+              }
+              resetReport();
+            }}
+            disabled={validate.isPending || create.isPending}
+          >
+            <SelectTrigger id="target-seller">
+              <SelectValue placeholder="Select an account" />
+            </SelectTrigger>
+            <SelectContent>
+              {known.map((account) => (
+                <SelectItem key={account.name} value={account.name}>
+                  {account.name} — {account.uploads} upload{account.uploads === 1 ? '' : 's'}
+                </SelectItem>
+              ))}
+              <SelectItem value={NEW_ACCOUNT}>+ New account…</SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+
         <p className="text-xs text-muted-foreground">
-          This seller name is added to every row created from the spreadsheet.
+          Every row in this batch is scraped as this seller, and its recommendations only ever read
+          this account&apos;s previous uploads.
         </p>
       </div>
 

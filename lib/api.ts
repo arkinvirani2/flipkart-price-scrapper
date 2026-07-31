@@ -15,6 +15,9 @@ import type {
   ScrapeInput,
 } from '@/types/dashboard';
 import type { ValidationReport } from '@/lib/validation/uploadSchema';
+// Type-only, so the server modules these live in are never pulled into the bundle.
+import type { AccountSummary } from '@/lib/store/jobStore';
+import type { RecommendationFile } from '@/lib/services/recommendations';
 
 export class ApiError extends Error {
   constructor(
@@ -65,6 +68,10 @@ function safeParse(text: string): unknown {
 
 export type JobSummary = JobManifest & { stats: JobStats };
 
+// Re-exported so client components get these shapes from one place and never
+// reach into a server-only module themselves.
+export type { AccountSummary, RecommendationFile };
+
 export const api = {
   listJobs: () => request<{ jobs: JobSummary[]; activeJobId: string | null }>('/api/jobs'),
 
@@ -77,11 +84,29 @@ export const api = {
       activeJobId: string | null;
     }>(`/api/jobs/${jobId}`),
 
-  createJob: (payload: { name: string; rows: ScrapeInput[]; options?: Partial<JobOptions> }) =>
+  createJob: (payload: {
+    name: string;
+    accountName: string;
+    rows: ScrapeInput[];
+    options?: Partial<JobOptions>;
+  }) =>
     request<{ job: JobManifest; stats: JobStats }>('/api/jobs', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  listAccounts: () => request<{ accounts: AccountSummary[] }>('/api/accounts'),
+
+  recommendations: (jobId: string) =>
+    request<{ job: JobManifest; recommendations: RecommendationFile }>(
+      `/api/jobs/${jobId}/recommendations`,
+    ),
+
+  regenerateRecommendations: (jobId: string) =>
+    request<{ job: JobManifest; recommendations: RecommendationFile }>(
+      `/api/jobs/${jobId}/recommendations`,
+      { method: 'POST' },
+    ),
 
   deleteJob: (jobId: string) => request<{ deleted: boolean }>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 

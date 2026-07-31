@@ -20,6 +20,7 @@ import {
   resultKey,
   rewriteJournal,
 } from '@/scraper/journal';
+import { sellerNamesMatch } from '@/scraper/parser';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 import type {
   JobManifest,
@@ -51,18 +52,28 @@ const cache: Map<string, JobRecord> = ((globalThis as Record<string, unknown>)._
 
 /* ------------------------------------------------------------------ create */
 
-export function createJob(name: string, inputs: ScrapeInput[], options: JobOptions): JobManifest {
+export function createJob(
+  name: string,
+  inputs: ScrapeInput[],
+  options: JobOptions,
+  accountName?: string,
+): JobManifest {
   ensureDataDir();
   const id = newJobId();
   ensureJobDir(id);
 
+  const createdAt = new Date().toISOString();
   const manifest: JobManifest = {
     id,
     name,
-    createdAt: new Date().toISOString(),
+    createdAt,
     state: 'queued',
     total: inputs.length,
     options,
+    // The account is the seller name every row carries, so the rows are the
+    // fallback when the caller does not name it explicitly.
+    accountName: (accountName ?? inputs[0]?.targetSeller ?? '').trim(),
+    uploadTime: createdAt,
   };
 
   writeFileSync(jobPaths.inputs(id), JSON.stringify(inputs, null, 2), 'utf8');
@@ -128,6 +139,12 @@ export function getJob(jobId: string): JobRecord | null {
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as JobManifest;
     const inputs = JSON.parse(readFileSync(jobPaths.inputs(jobId), 'utf8')) as ScrapeInput[];
+
+    // Jobs created before accounts existed have neither field. Backfilling in
+    // memory keeps them visible in the account-wise views without rewriting
+    // files the user never asked us to touch.
+    if (!manifest.accountName) manifest.accountName = inputs[0]?.targetSeller ?? '';
+    if (!manifest.uploadTime) manifest.uploadTime = manifest.createdAt;
     // readJournal, not the resume filter: the UI should show BLOCKED rows as the
     // failures they were. Blocked rows are only dropped when a run actually starts.
     const journal = readJournal(jobPaths.journal(jobId)) as JournalRow[];
@@ -155,6 +172,51 @@ export function listJobs(): JobManifest[] {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * Two account names are the same account when the scraper's own matcher says
+ * so, which is what makes "Shoppping Dil Se" and "ShopppingDilSe" one history
+ * rather than two.
+ */
+export function sameAccount(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  return sellerNamesMatch(left, right);
+}
+
+export interface AccountSummary {
+  name: string;
+  uploads: number;
+  lastUploadAt: string;
+}
+
+/**
+ * The accounts that have uploads, newest first.
+ *
+ * Derived from the job folders rather than kept in a separate registry — one
+ * fewer file to keep in step, and deleting the last batch for an account
+ * removes the account with it.
+ */
+export function listAccounts(): AccountSummary[] {
+  const accounts: AccountSummary[] = [];
+
+  for (const manifest of listJobs()) {
+    const name = manifest.accountName?.trim();
+    if (!name) continue;
+
+    const uploadedAt = manifest.uploadTime ?? manifest.createdAt;
+    const existing = accounts.find((account) => sameAccount(account.name, name));
+
+    if (existing) {
+      existing.uploads += 1;
+      if (uploadedAt > existing.lastUploadAt) existing.lastUploadAt = uploadedAt;
+      continue;
+    }
+
+    accounts.push({ name, uploads: 1, lastUploadAt: uploadedAt });
+  }
+
+  return accounts.sort((a, b) => b.lastUploadAt.localeCompare(a.lastUploadAt));
+}
+
 export function deleteJob(jobId: string): boolean {
   const dir = jobDir(jobId);
   if (!existsSync(dir)) return false;
@@ -165,13 +227,18 @@ export function deleteJob(jobId: string): boolean {
 
 /* --------------------------------------------------------------- mutation */
 
-export function setJobState(jobId: string, state: JobState, extra: Partial<JobManifest> = {}): JobManifest | null {
+/** Patch the manifest on disk and in the index. The one place job.json is edited. */
+export function updateManifest(jobId: string, patch: Partial<JobManifest>): JobManifest | null {
   const record = getJob(jobId);
   if (!record) return null;
 
-  record.manifest = { ...record.manifest, ...extra, state };
+  record.manifest = { ...record.manifest, ...patch };
   writeManifest(record.manifest);
   return record.manifest;
+}
+
+export function setJobState(jobId: string, state: JobState, extra: Partial<JobManifest> = {}): JobManifest | null {
+  return updateManifest(jobId, { ...extra, state });
 }
 
 export function updateJobOptions(jobId: string, options: JobOptions): JobManifest | null {
