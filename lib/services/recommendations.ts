@@ -12,16 +12,22 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { computeSettlement } from '@/lib/settlement';
+import { computeSettlement, type Settlement } from '@/lib/settlement';
 import {
   countRecommendations,
   recommendForRow,
+  staticRuleTarget,
   summarizeHistory,
   summarizeRecommendations,
   EMPTY_HISTORY,
+  type LearnedChoice,
+  type LearnedMeta,
   type Recommendation,
   type RecommendationHistoryEntry,
+  type RecommendationHistorySummary,
 } from '@/lib/recommendation';
+import type { UploadDecision } from '@/lib/intelligence/engine';
+import { syncAccount } from '@/lib/intelligence/store';
 import { getJob, getRows, listJobs, sameAccount, updateManifest } from '@/lib/store/jobStore';
 import { jobPaths } from '@/lib/store/paths';
 import type { JobRow, RecommendationCounts } from '@/types/dashboard';
@@ -87,6 +93,74 @@ function historyByFsn(accountName: string, excludeJobId: string): Map<string, Re
   return index;
 }
 
+/* ------------------------------------------------------------- the learner */
+
+/**
+ * Translate a champion's forecast into a target price the rule engine can use.
+ *
+ * Two guards are not negotiable. The champion is only allowed to set the price
+ * once it is `trusted` — enough scored predictions, and a confidence that
+ * survives the small-sample correction — so a formula fitted to five points
+ * cannot start moving real prices on a hunch. And its forecast is clamped to at
+ * most the current winning price, because a price above today's winner would not
+ * win the Buy Box however well it predicts next week's board.
+ *
+ * Everything downstream is unchanged: the settlement floor still vetoes, and a
+ * row that needed no change still needs none.
+ */
+function learnedChoice(
+  decision: UploadDecision | undefined,
+  settlement: Settlement,
+  history: RecommendationHistorySummary,
+): LearnedChoice | undefined {
+  if (!decision) return undefined;
+
+  const meta: LearnedMeta = {
+    championId: decision.championId ?? 'rule:engine',
+    championLabel: decision.championLabel,
+    championKind: decision.championKind,
+    predictedWinnerPrice: decision.predictedWinnerPrice,
+    confidence: decision.confidence,
+    accuracyPct: decision.accuracyPct,
+    averageError: decision.averageError,
+    timesUsed: decision.timesUsed,
+    lastUsedAt: decision.lastUsedAt,
+    formula: decision.formula,
+    applied: false,
+    ranking: decision.ranking,
+  };
+
+  const myPrice = settlement.sellerPrice;
+  const winnerPrice = settlement.currentPrice;
+
+  // Not trusted, or nothing to say: the champion still reports its ranking, but
+  // rules 4/6/7 keep the pen.
+  if (
+    !decision.trusted ||
+    decision.predictedWinnerPrice === null ||
+    myPrice === null ||
+    winnerPrice === null ||
+    winnerPrice >= myPrice
+  ) {
+    return {
+      ...staticRuleTarget(myPrice ?? 0, winnerPrice ?? 0, history),
+      meta,
+    };
+  }
+
+  const target = Math.max(1, Math.min(decision.predictedWinnerPrice, winnerPrice));
+
+  return {
+    target,
+    rule: 'LEARNED',
+    appliedRules: ['RULE_4', 'LEARNED'],
+    reason: `${decision.championLabel} is this FSN's best predictor (${decision.reason}) and forecasts the next winning price at ₹${decision.predictedWinnerPrice.toLocaleString(
+      'en-IN',
+    )} — pricing at ₹${target.toLocaleString('en-IN')}.`,
+    meta: { ...meta, applied: true },
+  };
+}
+
 /* ---------------------------------------------------------- generate/read */
 
 /**
@@ -103,14 +177,23 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
   const history = accountName ? historyByFsn(accountName, jobId) : new Map<string, RecommendationHistoryEntry[]>();
   const historyJobs = new Set<string>();
 
+  // Bring this account's per-FSN intelligence up to date first: it replays any
+  // upload it has not folded in yet, in chronological order, and returns what
+  // each FSN's best-performing predictor says for this one.
+  const learned = accountName ? syncAccount(accountName).decisions.get(jobId) : undefined;
+
   const recommendations = record.rows.map((row: JobRow) => {
     const entries = history.get(row.fsn);
     for (const entry of entries ?? []) historyJobs.add(entry.jobId);
 
+    const settlement = computeSettlement(row);
+    const summary = entries ? summarizeHistory(entries) : EMPTY_HISTORY;
+
     return recommendForRow(
       row,
-      computeSettlement(row),
-      entries ? summarizeHistory(entries) : EMPTY_HISTORY,
+      settlement,
+      summary,
+      learnedChoice(learned?.get(row.fsn), settlement, summary),
     );
   });
 

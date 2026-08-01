@@ -20,6 +20,7 @@
  */
 
 import type { Settlement } from '@/lib/settlement';
+import type { RankedPredictor } from '@/lib/intelligence/types';
 import type { JobRow, RecommendationCounts } from '@/types/dashboard';
 
 /* -------------------------------------------------------------- categories */
@@ -56,6 +57,8 @@ export type RuleId =
   | 'RULE_8'
   | 'RULE_9'
   | 'RULE_10'
+  /** The per-FSN champion predictor set the price — see lib/intelligence. */
+  | 'LEARNED'
   | 'NO_DATA';
 
 export const RULE_LABEL: Record<RuleId, string> = {
@@ -69,6 +72,7 @@ export const RULE_LABEL: Record<RuleId, string> = {
   RULE_8: 'Rule 8 — recommendation equals the current price',
   RULE_9: 'Rule 9 — never recommend a loss-making price',
   RULE_10: 'Rule 10 — no history, current upload only',
+  LEARNED: 'Learned — this FSN’s best-performing predictor',
   NO_DATA: 'No usable scrape data',
 };
 
@@ -195,11 +199,88 @@ export interface Recommendation {
   appliedRules: RuleId[];
   reason: string;
   history: RecommendationHistorySummary;
+  /** Present once the FSN has enough scored predictions to rank its rules. */
+  learned?: LearnedMeta;
+}
+
+/** What the learning engine contributed to a recommendation, for display and audit. */
+export interface LearnedMeta {
+  championId: string;
+  championLabel: string;
+  championKind: 'rule' | 'formula';
+  /** The champion's raw prediction of the next winning price. */
+  predictedWinnerPrice: number | null;
+  confidence: number;
+  accuracyPct: number | null;
+  averageError: number | null;
+  timesUsed: number;
+  lastUsedAt: string | null;
+  formula?: string;
+  /** Whether the champion actually set the price, or only advised. */
+  applied: boolean;
+  ranking: RankedPredictor[];
+}
+
+/** A learned target, carrying the metadata that explains where it came from. */
+export interface LearnedChoice extends TargetChoice {
+  meta: LearnedMeta;
 }
 
 /** Money the way the rest of the dashboard writes it, for the reason sentences. */
 function money(value: number): string {
   return `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
+/** A chosen price, before the settlement gate has had its say. */
+export interface TargetChoice {
+  target: number;
+  rule: RuleId;
+  appliedRules: RuleId[];
+  reason: string;
+}
+
+/**
+ * Rules 4, 6 and 7: what price to aim at once the winner is known to undercut us.
+ *
+ * Extracted so the learning engine can score this policy as one predictor among
+ * many without a second copy of it existing anywhere.
+ */
+export function staticRuleTarget(
+  myPrice: number,
+  winnerPrice: number,
+  history: RecommendationHistorySummary,
+): TargetChoice {
+  const appliedRules: RuleId[] = ['RULE_4'];
+  let target = winnerPrice;
+  let rule: RuleId = 'RULE_4';
+  let reason = `Winner is ${money(myPrice - winnerPrice)} below my price — matching ${money(
+    winnerPrice,
+  )} takes the Buy Box.`;
+
+  // Rule 6 — a price that has proved it wins. Only worth preferring when it
+  // still undercuts today's winner: a proven price above the current winning
+  // price would not win anything now.
+  if (history.repeatedWinningPrice !== null && history.repeatedWinningPrice <= target) {
+    target = history.repeatedWinningPrice;
+    rule = 'RULE_6';
+    appliedRules.push('RULE_6');
+    reason = `${money(target)} has been the winning price on ${history.repeatedWinningPriceCount} previous uploads — preferring that proven price.`;
+  }
+
+  // Rule 7 — five uploads without the Buy Box.
+  if (history.lastFiveWithoutBuybox && winnerPrice - 1 < target) {
+    target = winnerPrice - 1;
+    rule = 'RULE_7';
+    appliedRules.push('RULE_7');
+    reason = `The last ${Math.min(5, history.uploads)} uploads never won the Buy Box — undercutting the winner by ₹1 at ${money(
+      target,
+    )}.`;
+  } else if (history.lastFiveWithoutBuybox) {
+    // Rule 6 already went lower; rule 7 still shaped the decision, so record it.
+    appliedRules.push('RULE_7');
+  }
+
+  return { target, rule, appliedRules, reason };
 }
 
 /**
@@ -213,6 +294,13 @@ export function recommendForRow(
   row: JobRow,
   settlement: Settlement,
   history: RecommendationHistorySummary,
+  /**
+   * The learning engine's verdict, when this FSN has earned one. It replaces
+   * rules 4/6/7 — the *target price* — and nothing else: rules 1, 3 and 5 still
+   * decide whether a change is wanted at all, and rules 2 and 9 still hold the
+   * veto. A learned price can never be a loss-making price.
+   */
+  learned?: LearnedChoice,
 ): Recommendation {
   const myPrice = settlement.sellerPrice;
   const winnerPrice = settlement.currentPrice;
@@ -236,6 +324,9 @@ export function recommendForRow(
     projectedSettlement: null as number | null,
     hasBuybox: settlement.hasBuybox,
     history,
+    // Carried on every outcome, not just the ones the champion priced: the
+    // ranking is worth seeing even on a row that needed no change.
+    learned: learned?.meta,
   };
 
   /* ---- rows that cannot be judged at all -------------------------------- */
@@ -311,39 +402,13 @@ export function recommendForRow(
     };
   }
 
-  /* ---- rule 4: the winner undercuts us ---------------------------------- */
+  /* ---- rules 4, 6 and 7: pick a target below the winner ------------------ */
 
-  applied.push('RULE_4');
-  let target = winnerPrice;
-  let rule: RuleId = 'RULE_4';
-  let reason = `Winner is ${money(myPrice - winnerPrice)} below my price — matching ${money(
-    winnerPrice,
-  )} takes the Buy Box.`;
-
-  /* ---- rule 6: a price that has proved it wins -------------------------- */
-
-  // Only worth preferring when it still undercuts today's winner: a proven price
-  // above the current winning price would not win anything now.
-  if (history.repeatedWinningPrice !== null && history.repeatedWinningPrice <= target) {
-    target = history.repeatedWinningPrice;
-    rule = 'RULE_6';
-    applied.push('RULE_6');
-    reason = `${money(target)} has been the winning price on ${history.repeatedWinningPriceCount} previous uploads — preferring that proven price.`;
-  }
-
-  /* ---- rule 7: five uploads without the Buy Box ------------------------- */
-
-  if (history.lastFiveWithoutBuybox && winnerPrice - 1 < target) {
-    target = winnerPrice - 1;
-    rule = 'RULE_7';
-    applied.push('RULE_7');
-    reason = `The last ${Math.min(5, history.uploads)} uploads never won the Buy Box — undercutting the winner by ₹1 at ${money(
-      target,
-    )}.`;
-  } else if (history.lastFiveWithoutBuybox) {
-    // Rule 6 already went lower; rule 7 still shaped the decision, so record it.
-    applied.push('RULE_7');
-  }
+  const chosen = learned ?? staticRuleTarget(myPrice, winnerPrice, history);
+  const target = chosen.target;
+  const rule: RuleId = chosen.rule;
+  const reason = chosen.reason;
+  applied.push(...chosen.appliedRules);
 
   /* ---- rules 2 and 9: the price has to stay profitable ------------------ */
 

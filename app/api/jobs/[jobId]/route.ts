@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server';
 import { computeStats, deleteJob, getJob } from '@/lib/store/jobStore';
 import { getRunner } from '@/lib/runner/jobRunner';
 import { ensureRecovered } from '@/lib/services/recovery';
+import { resetAccount } from '@/lib/intelligence/store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -37,7 +38,16 @@ export async function DELETE(_request: Request, { params }: Context) {
     return NextResponse.json({ error: 'Stop the job before deleting it.' }, { status: 409 });
   }
 
-  return deleteJob(jobId)
-    ? NextResponse.json({ deleted: true })
-    : NextResponse.json({ error: 'Job not found.' }, { status: 404 });
+  // Note the account before the folder goes: the learned metrics are running
+  // sums over this job's outcomes and there is no way to subtract one job back
+  // out of them. Dropping the account's intelligence makes the next run replay
+  // the surviving uploads from scratch, which is the only correct answer.
+  const accountName = getJob(jobId)?.manifest.accountName;
+
+  if (!deleteJob(jobId)) {
+    return NextResponse.json({ error: 'Job not found.' }, { status: 404 });
+  }
+
+  if (accountName) resetAccount(accountName);
+  return NextResponse.json({ deleted: true });
 }

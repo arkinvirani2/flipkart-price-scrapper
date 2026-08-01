@@ -17,3 +17,4 @@ export async function GET() {
   ensureRecovered();
   return NextResponse.json({ accounts: listAccounts() });
 }
+
