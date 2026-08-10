@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/select';
 import { formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
 import { RULE_LABEL, type Recommendation } from '@/lib/recommendation';
+import { sellerListingUrl } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 
 /**
@@ -22,6 +23,10 @@ import { cn } from '@/lib/utils';
  * something you work through in order and tick off, so a page number is a more
  * useful position than a scroll offset. Search, sort and page size all live in
  * this component's own state, so switching tabs starts each list clean.
+ *
+ * As in the settlement table, clicking a row opens that product's Flipkart
+ * Seller Hub listing in a new tab, so the price can be changed where it is
+ * recommended. The View button stays a separate action for the detail dialog.
  */
 
 type SortDirection = 'asc' | 'desc';
@@ -273,6 +278,9 @@ export function RecommendationTable({
     setPage(0);
   }, [search, pageSize, rows]);
 
+  const openListing = (fsn: string) =>
+    window.open(sellerListingUrl(fsn), '_blank', 'noopener,noreferrer');
+
   function toggleSort(key: string) {
     setSort((currentSort) => {
       if (currentSort?.key !== key) return { key, direction: 'asc' };
@@ -359,7 +367,20 @@ export function RecommendationTable({
                 </tr>
               ) : (
                 visible.map((item) => (
-                  <tr key={item.key} className="border-b transition-colors last:border-0 hover:bg-accent/40">
+                  <tr
+                    key={item.key}
+                    tabIndex={0}
+                    className="cursor-pointer border-b outline-none transition-colors last:border-0 hover:bg-accent/40 focus-visible:bg-accent/60"
+                    onClick={() => openListing(item.fsn)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openListing(item.fsn);
+                      }
+                    }}
+                    title={`Open listing ${item.fsn} in Flipkart Seller Hub`}
+                  >
                     {columns.map((column) => (
                       <td
                         key={column.key}
@@ -377,7 +398,12 @@ export function RecommendationTable({
                         variant="ghost"
                         size="sm"
                         className="h-7 px-2 text-muted-foreground hover:text-foreground"
-                        onClick={() => onView(item)}
+                        onClick={(event) => {
+                          // The row itself opens Seller Hub — the eye stays the
+                          // way into the detail dialog.
+                          event.stopPropagation();
+                          onView(item);
+                        }}
                         aria-label={`View details for ${item.sku}`}
                       >
                         <Eye className="size-4" />
