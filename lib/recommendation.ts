@@ -21,6 +21,7 @@
 
 import type { Settlement } from '@/lib/settlement';
 import type { RankedPredictor } from '@/lib/intelligence/types';
+import { emptyDemand, type FsnDemand } from '@/lib/demand';
 import type { JobRow, RecommendationCounts } from '@/types/dashboard';
 
 /* -------------------------------------------------------------- categories */
@@ -57,6 +58,12 @@ export type RuleId =
   | 'RULE_8'
   | 'RULE_9'
   | 'RULE_10'
+  /* Rules 11–14 are the Buy Box + orders layer. They only ever fire on a row
+   * that rule 1 would previously have ended, so nothing above them changed. */
+  | 'RULE_11'
+  | 'RULE_12'
+  | 'RULE_13'
+  | 'RULE_14'
   /** The per-FSN champion predictor set the price — see lib/intelligence. */
   | 'LEARNED'
   | 'NO_DATA';
@@ -72,9 +79,193 @@ export const RULE_LABEL: Record<RuleId, string> = {
   RULE_8: 'Rule 8 — recommendation equals the current price',
   RULE_9: 'Rule 9 — never recommend a loss-making price',
   RULE_10: 'Rule 10 — no history, current upload only',
+  RULE_11: 'Rule 11 — Buy Box with orders, or none to be had',
+  RULE_12: 'Rule 12 — Buy Box with no orders, too little evidence to act',
+  RULE_13: 'Rule 13 — Buy Box with no orders, smallest useful price cut',
+  RULE_14: 'Rule 14 — Buy Box with no orders, already at the price floor',
   LEARNED: 'Learned — this FSN’s best-performing predictor',
   NO_DATA: 'No usable scrape data',
 };
+
+/* --------------------------------------------------- benchmark and demand */
+
+/**
+ * What Flipkart's own Benchmark Price was worth on this row.
+ *
+ * Carried separately from `reasonCode` on purpose. The two answer different
+ * questions — "was there a usable market anchor?" and "what did we do?" — and
+ * collapsing them would lose the first every time a Buy Box outcome won the
+ * second, which is exactly the row where knowing the benchmark was zero matters.
+ */
+export type BenchmarkStatus =
+  /** Flipkart published no benchmark for this FSN (the cell is 0 or blank). */
+  | 'BENCHMARK_ZERO'
+  /** A benchmark exists but sits under the minimum acceptable price. */
+  | 'BELOW_THRESHOLD'
+  /** A benchmark exists and is affordable — usable as a price anchor. */
+  | 'BENCHMARK_USABLE'
+  /** No benchmark column in the upload at all. */
+  | 'BENCHMARK_MISSING';
+
+export const BENCHMARK_STATUS_LABEL: Record<BenchmarkStatus, string> = {
+  BENCHMARK_ZERO: 'No benchmark published',
+  BELOW_THRESHOLD: 'Benchmark below the minimum acceptable price',
+  BENCHMARK_USABLE: 'Benchmark usable',
+  BENCHMARK_MISSING: 'No benchmark column in the upload',
+};
+
+/** What the decision layer actually did, in one token. */
+export type PriceReasonCode =
+  | BenchmarkStatus
+  /** Buy Box held and the FSN sold in the last 24h — nothing to fix. */
+  | 'BUYBOX_HEALTHY'
+  /** Buy Box held, nothing sold in 24h, and the evidence supports a small cut. */
+  | 'BUYBOX_STALE_REDUCE'
+  /** Buy Box held, nothing sold in 24h, but a quiet day is normal for this FSN. */
+  | 'BUYBOX_STALE_HOLD'
+  /** Buy Box held, nothing sold in 24h, and the price is already at its floor. */
+  | 'BUYBOX_AT_FLOOR'
+  /** Buy Box held, nothing sold in 24h, and the listing has no stock to sell. */
+  | 'BUYBOX_NO_STOCK'
+  /** Buy Box held, but no orders report was uploaded, so 24h activity is unknown. */
+  | 'NO_ORDER_DATA'
+  /** No Buy Box — the pre-existing rules decided this row. */
+  | 'NORMAL'
+  | 'NO_DATA';
+
+/**
+ * How strong the "Buy Box but no orders" signal is on one FSN.
+ *
+ * `insufficient` is the default and the only band that never moves a price.
+ */
+export type DemandSignal = 'insufficient' | 'weak' | 'moderate' | 'strong';
+
+/**
+ * The knobs of the Buy Box layer, in one exported object so they can be tuned
+ * and asserted against rather than hunted for as literals.
+ *
+ * The confidence thresholds are calibrated against the Poisson zero-probability
+ * below, and were chosen to land where the brief asked them to land:
+ *
+ *     ~10 units/day → 100% → strong    (0 orders is a real anomaly)
+ *     ~3 units/day  →  95% → strong
+ *     ~1–2/day      →  63–86% → weak/moderate  (a quiet day is ordinary)
+ *     <0.8/day      →  <55% → insufficient     (do not touch the price)
+ */
+export const BUYBOX_DEMAND_TUNING = {
+  /** Confidence at or above which the band applies. */
+  strongConfidence: 0.95,
+  moderateConfidence: 0.85,
+  weakConfidence: 0.55,
+  /** The largest price cut each band may authorise, as a fraction of the price. */
+  strongMaxCut: 0.05,
+  moderateMaxCut: 0.03,
+  weakMaxCut: 0.015,
+  /** A report shorter than this cannot reach full confidence on its own. */
+  fullCoverageDays: 7,
+  /** Below this, the change is not worth an edit in Seller Hub. */
+  minimumStep: 1,
+} as const;
+
+/** The evidence behind a Buy Box + zero-orders decision, kept for the audit trail. */
+export interface DemandEvidence {
+  /** Units sold in the trailing 24 hours. */
+  last24hUnits: number;
+  /** What this FSN normally sells in a day, over the rest of the report. */
+  unitsPerDay: number;
+  /**
+   * P(zero units in a day) if demand had not changed, as Poisson(unitsPerDay).
+   * This is the whole "is zero unusual?" question in one number.
+   */
+  zeroProbability: number;
+  /** (1 − zeroProbability), damped by how much history the report covers. 0–1. */
+  confidence: number;
+  signal: DemandSignal;
+  /** True when the band was stepped down because we already undercut the benchmark. */
+  damped: boolean;
+  observedDays: number;
+}
+
+/**
+ * Score a zero-order day against what the FSN normally does.
+ *
+ * Pure, and separated from the pricing so the judgement can be tested on its
+ * own: given a rate and a window, how surprised should we be by a silent day?
+ *
+ * `damped` implements a rule the brief is explicit about — do not assume zero
+ * orders means the price is wrong. When we are already at or under Flipkart's
+ * own benchmark, price is the least likely explanation, so the band is stepped
+ * down one notch and a strong signal buys a moderate cut rather than a large one.
+ */
+export function assessZeroOrderEvidence(
+  demand: FsnDemand,
+  observedDays: number,
+  options: { alreadyUnderBenchmark: boolean } = { alreadyUnderBenchmark: false },
+): DemandEvidence {
+  const unitsPerDay = Math.max(0, demand.unitsPerDay);
+  const zeroProbability = Math.exp(-unitsPerDay);
+
+  // A two-day report cannot tell us what "normal" is, however busy those two
+  // days were, so short windows can never reach the top bands on their own.
+  const coverage = Math.min(1, Math.max(0, observedDays) / BUYBOX_DEMAND_TUNING.fullCoverageDays);
+  const confidence = (1 - zeroProbability) * coverage;
+
+  const bands: DemandSignal[] = ['insufficient', 'weak', 'moderate', 'strong'];
+  let level = 0;
+  if (confidence >= BUYBOX_DEMAND_TUNING.strongConfidence) level = 3;
+  else if (confidence >= BUYBOX_DEMAND_TUNING.moderateConfidence) level = 2;
+  else if (confidence >= BUYBOX_DEMAND_TUNING.weakConfidence) level = 1;
+
+  const damped = options.alreadyUnderBenchmark && level > 0;
+  if (damped) level -= 1;
+
+  return {
+    last24hUnits: demand.last24hUnits,
+    unitsPerDay,
+    zeroProbability,
+    confidence,
+    signal: bands[level],
+    damped,
+    observedDays,
+  };
+}
+
+/** The largest cut a signal authorises, as a fraction of the current price. */
+export function maxCutFor(signal: DemandSignal): number {
+  switch (signal) {
+    case 'strong':
+      return BUYBOX_DEMAND_TUNING.strongMaxCut;
+    case 'moderate':
+      return BUYBOX_DEMAND_TUNING.moderateMaxCut;
+    case 'weak':
+      return BUYBOX_DEMAND_TUNING.weakMaxCut;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * The lowest price that still settles at or above the minimum — the hard floor.
+ *
+ * Derived from the settlement identity the whole dashboard already runs on:
+ *
+ *     settlement(P) = currentBankSettlement + (P − myPrice)
+ *
+ * Setting settlement(P) to the threshold and solving for P gives the price
+ * below which a sale stops being worth making. Expressing the threshold in
+ * price terms is what lets the benchmark, the competitor price and the floor be
+ * compared with each other at all.
+ *
+ * Null when any input is missing — and a null floor is treated downstream as
+ * "no price can be proved safe", never as "no floor".
+ */
+export function minimumAcceptablePrice(settlement: Settlement): number | null {
+  const { sellerPrice, currentBankSettlement, bankSettlementThreshold } = settlement;
+  if (sellerPrice === null || currentBankSettlement === null || bankSettlementThreshold === null) {
+    return null;
+  }
+  return sellerPrice + (bankSettlementThreshold - currentBankSettlement);
+}
 
 /* ----------------------------------------------------------------- history */
 
@@ -192,16 +383,57 @@ export interface Recommendation {
   projectedSettlement: number | null;
 
   hasBuybox: boolean | null;
+
+  /** Flipkart's system-generated Benchmark Price, straight from the listing sheet. */
+  benchmarkPrice: number | null;
+  /** What that benchmark was worth here — see BenchmarkStatus. Always set. */
+  benchmarkStatus: BenchmarkStatus;
+  /** The price floor implied by the minimum settlement. Null when unprovable. */
+  minAcceptablePrice: number | null;
+  /** Units sold in the last 24h. Null only when no orders report was uploaded. */
+  ordersLast24h: number | null;
+  /** What this FSN normally sells per day. Null without an orders report. */
+  historicalUnitsPerDay: number | null;
+  /** The zero-order evidence, when the Buy Box layer ran. */
+  demand?: DemandEvidence;
+  /**
+   * How much this recommendation is trusted, 0–1.
+   *
+   * Only the Buy Box layer produces a graded confidence — the deterministic
+   * rules either apply or do not, so they report 1 when they set a price and 0
+   * when they decline to.
+   */
+  confidence: number;
+
   category: RecommendationCategory;
   /** The rule that decided the outcome. */
   rule: RuleId;
   /** Every rule that took part, including the deciding one. */
   appliedRules: RuleId[];
+  /** The outcome in one token, for filtering and export. */
+  reasonCode: PriceReasonCode;
   reason: string;
   history: RecommendationHistorySummary;
   /** Present once the FSN has enough scored predictions to rank its rules. */
   learned?: LearnedMeta;
 }
+
+/**
+ * The order-side inputs to a recommendation.
+ *
+ * `demand` being null while `ordersAvailable` is true means the report was read
+ * and this FSN was not in it — which is zero orders, not missing data. The two
+ * flags exist separately so that distinction cannot be lost.
+ */
+export interface DemandContext {
+  /** True when an orders report was uploaded for this job at all. */
+  ordersAvailable: boolean;
+  demand: FsnDemand | null;
+  /** Days the orders report spans. */
+  observedDays: number;
+}
+
+const NO_DEMAND_CONTEXT: DemandContext = { ordersAvailable: false, demand: null, observedDays: 0 };
 
 /** What the learning engine contributed to a recommendation, for display and audit. */
 export interface LearnedMeta {
@@ -301,11 +533,25 @@ export function recommendForRow(
    * veto. A learned price can never be a loss-making price.
    */
   learned?: LearnedChoice,
+  /**
+   * The last 24 hours of orders for this FSN. Omitted entirely when no orders
+   * report was uploaded, in which case rule 1 behaves exactly as it always did.
+   */
+  demandContext: DemandContext = NO_DEMAND_CONTEXT,
 ): Recommendation {
   const myPrice = settlement.sellerPrice;
   const winnerPrice = settlement.currentPrice;
   const currentSettlement = settlement.currentBankSettlement;
   const minSettlement = settlement.bankSettlementThreshold;
+
+  const benchmarkPrice = row.benchmarkPrice ?? null;
+  const minAcceptablePrice = minimumAcceptablePrice(settlement);
+  const benchmarkStatus = classifyBenchmark(benchmarkPrice, minAcceptablePrice);
+  const demand = demandContext.ordersAvailable
+    ? // No rows for an FSN means it sold nothing, so a zeroed record is the
+      // truthful reading — see lib/orders.
+      (demandContext.demand ?? emptyDemand(row.fsn, demandContext.observedDays - 1))
+    : null;
 
   const base = {
     index: row.index,
@@ -323,6 +569,12 @@ export function recommendForRow(
     minSettlement,
     projectedSettlement: null as number | null,
     hasBuybox: settlement.hasBuybox,
+    benchmarkPrice,
+    benchmarkStatus,
+    minAcceptablePrice,
+    ordersLast24h: demand?.last24hUnits ?? null,
+    historicalUnitsPerDay: demand?.unitsPerDay ?? null,
+    confidence: 0,
     history,
     // Carried on every outcome, not just the ones the champion priced: the
     // ranking is worth seeing even on a row that needed no change.
@@ -337,6 +589,7 @@ export function recommendForRow(
       category: 'needsReview',
       rule: 'NO_DATA',
       appliedRules: ['NO_DATA'],
+      reasonCode: 'NO_DATA',
       reason: row.status === 'running' ? 'Currently being scraped.' : 'Not scraped yet.',
     };
   }
@@ -346,6 +599,7 @@ export function recommendForRow(
       category: 'needsReview',
       rule: 'NO_DATA',
       appliedRules: ['NO_DATA'],
+      reasonCode: 'NO_DATA',
       reason: `Scrape failed (${row.result.status}) — no prices to work from.`,
     };
   }
@@ -355,6 +609,7 @@ export function recommendForRow(
       category: 'needsReview',
       rule: 'NO_DATA',
       appliedRules: ['NO_DATA'],
+      reasonCode: 'NO_DATA',
       reason: 'The scrape did not return both my price and the winner price.',
     };
   }
@@ -364,16 +619,22 @@ export function recommendForRow(
   // so the detail view can say so out loud.
   const applied: RuleId[] = history.uploads === 0 ? ['RULE_10'] : [];
 
-  /* ---- rule 1: already winning ------------------------------------------ */
+  /* ---- rule 1 + rules 11-14: already winning ---------------------------- */
 
   if (settlement.hasBuybox === true) {
-    return {
-      ...base,
-      category: 'buyboxWon',
-      rule: 'RULE_1',
-      appliedRules: [...applied, 'RULE_1'],
-      reason: 'Already winning Buy Box.',
-    };
+    return decideWithBuybox({
+      base,
+      applied,
+      myPrice,
+      currentSettlement,
+      minSettlement,
+      minAcceptablePrice,
+      benchmarkPrice,
+      benchmarkStatus,
+      stockCount: row.stockCount ?? null,
+      demand,
+      observedDays: demandContext.observedDays,
+    });
   }
 
   /* ---- rule 3: matching the winner already ------------------------------ */
@@ -384,6 +645,7 @@ export function recommendForRow(
       category: 'alreadyCorrect',
       rule: 'RULE_3',
       appliedRules: [...applied, 'RULE_3'],
+      reasonCode: benchmarkStatus,
       reason: 'Already matching winner price.',
     };
   }
@@ -396,6 +658,7 @@ export function recommendForRow(
       category: 'alreadyCorrect',
       rule: 'RULE_5',
       appliedRules: [...applied, 'RULE_5'],
+      reasonCode: benchmarkStatus,
       reason: `Winner price ${money(winnerPrice)} is above my price ${money(
         myPrice,
       )} — keeping the current price.`,
@@ -418,6 +681,7 @@ export function recommendForRow(
       category: 'settlementUnsafe',
       rule: 'RULE_2',
       appliedRules: [...applied, 'RULE_2'],
+      reasonCode: benchmarkStatus,
       reason:
         'Bank-settlement values are missing for this SKU, so no price can be proved safe. Fill them in and re-run.',
     };
@@ -432,6 +696,7 @@ export function recommendForRow(
       category: 'settlementUnsafe',
       rule: 'RULE_9',
       appliedRules: [...applied, 'RULE_2', 'RULE_9'],
+      reasonCode: benchmarkStatus,
       reason: `Dropping to ${money(target)} would settle at ${money(projected)}, below the minimum ${money(
         minSettlement,
       )} — not worth winning.`,
@@ -446,6 +711,7 @@ export function recommendForRow(
       category: 'alreadyCorrect',
       rule: 'RULE_8',
       appliedRules: [...applied, 'RULE_8'],
+      reasonCode: benchmarkStatus,
       reason: 'The recommended price equals the current price — no recommendation.',
     };
   }
@@ -458,8 +724,268 @@ export function recommendForRow(
     category: 'priceChange',
     rule,
     appliedRules: applied,
+    reasonCode: benchmarkStatus,
+    // A deterministic rule either fires or does not; there is no half-applied
+    // rule 4, so a price it sets is reported at full confidence.
+    confidence: 1,
     reason,
   };
+}
+
+/* -------------------------------------------- rules 11-14: Buy Box + orders */
+
+/** The fields the Buy Box layer reads. Grouped so the call site stays readable. */
+interface BuyboxInput {
+  base: Omit<Recommendation, 'category' | 'rule' | 'appliedRules' | 'reasonCode' | 'reason'>;
+  applied: RuleId[];
+  myPrice: number;
+  currentSettlement: number | null;
+  minSettlement: number | null;
+  minAcceptablePrice: number | null;
+  benchmarkPrice: number | null;
+  benchmarkStatus: BenchmarkStatus;
+  stockCount: number | null;
+  demand: FsnDemand | null;
+  observedDays: number;
+}
+
+/**
+ * What to do about a row we are already winning.
+ *
+ * This is the one behavioural change to the pre-existing rules. Rule 1 used to
+ * end the story — Buy Box held, therefore the price is right — and that
+ * inference is only sound while the listing is converting. Holding the Buy Box
+ * on a product nobody is buying says we are the cheapest of a set of prices the
+ * customer rejected, which is not the same thing as being priced correctly.
+ *
+ * Every path out of here still respects the settlement floor, and the default
+ * on thin evidence is to change nothing. Without an orders report the function
+ * returns precisely what rule 1 always returned.
+ */
+function decideWithBuybox(input: BuyboxInput): Recommendation {
+  const {
+    base,
+    applied,
+    myPrice,
+    currentSettlement,
+    minSettlement,
+    minAcceptablePrice,
+    benchmarkPrice,
+    benchmarkStatus,
+    stockCount,
+    demand,
+    observedDays,
+  } = input;
+
+  const hold = (rule: RuleId, reasonCode: PriceReasonCode, reason: string, extra?: Partial<Recommendation>) => ({
+    ...base,
+    ...extra,
+    category: 'buyboxWon' as const,
+    rule,
+    appliedRules: [...applied, 'RULE_1' as RuleId, rule].filter(
+      (id, index, all) => all.indexOf(id) === index,
+    ),
+    reasonCode,
+    reason,
+  });
+
+  /* ---- no orders report: rule 1, unchanged ------------------------------ */
+
+  if (!demand) {
+    return hold(
+      'RULE_1',
+      'NO_ORDER_DATA',
+      'Already winning Buy Box. Upload the Flipkart orders report to check it is actually converting.',
+    );
+  }
+
+  /* ---- rule 11: the Buy Box is doing its job ---------------------------- */
+
+  if (demand.last24hUnits > 0) {
+    return hold(
+      'RULE_11',
+      'BUYBOX_HEALTHY',
+      `Already winning Buy Box, and ${demand.last24hUnits} unit${
+        demand.last24hUnits === 1 ? '' : 's'
+      } sold in the last 24 hours — the price is working.`,
+      { confidence: 1 },
+    );
+  }
+
+  // Zero orders with nothing on the shelf is a stock problem wearing a pricing
+  // problem's clothes. Cutting the price would not sell a unit that is not there.
+  if (stockCount === 0) {
+    return hold(
+      'RULE_11',
+      'BUYBOX_NO_STOCK',
+      'Winning the Buy Box with no orders in 24 hours, but stock is zero — nothing to sell, so the price is not the problem.',
+    );
+  }
+
+  /* ---- rules 12-14: zero orders, how surprising is that? ---------------- */
+
+  const evidence = assessZeroOrderEvidence(demand, observedDays, {
+    // Already at or under Flipkart's own market read: undercutting ourselves
+    // further is the least likely fix, so the evidence is worth one band less.
+    alreadyUnderBenchmark: benchmarkPrice !== null && benchmarkPrice > 0 && benchmarkPrice >= myPrice,
+  });
+
+  const normally =
+    evidence.unitsPerDay > 0
+      ? `this FSN normally sells ${evidence.unitsPerDay.toFixed(2)} units/day`
+      : 'this FSN has not sold at all across the whole report';
+
+  if (evidence.signal === 'insufficient') {
+    return hold(
+      'RULE_12',
+      'BUYBOX_STALE_HOLD',
+      `Winning the Buy Box with no orders in 24 hours, but ${normally} — a quiet day is unremarkable${
+        evidence.damped ? ' and the price is already at or under the benchmark' : ''
+      }, so the price is left alone.`,
+      { demand: evidence, confidence: evidence.confidence },
+    );
+  }
+
+  // Rule 2 keeps its veto ahead of any cut: with no floor to prove a price
+  // against, no price can be proved safe, so none is offered.
+  if (minAcceptablePrice === null || currentSettlement === null || minSettlement === null) {
+    return {
+      ...base,
+      demand: evidence,
+      confidence: evidence.confidence,
+      category: 'settlementUnsafe',
+      rule: 'RULE_2',
+      appliedRules: [...applied, 'RULE_1', 'RULE_12', 'RULE_2'],
+      reasonCode: 'BUYBOX_STALE_HOLD',
+      reason: `Winning the Buy Box with no orders in 24 hours (${normally}), but the bank-settlement values are missing, so no lower price can be proved safe.`,
+    };
+  }
+
+  const target = staleTarget({
+    myPrice,
+    benchmarkPrice,
+    benchmarkUsable: benchmarkStatus === 'BENCHMARK_USABLE',
+    floor: minAcceptablePrice,
+    maxCut: maxCutFor(evidence.signal),
+  });
+
+  const cut = myPrice - target;
+
+  /* ---- rule 14: the floor already has the price ------------------------- */
+
+  if (cut < BUYBOX_DEMAND_TUNING.minimumStep) {
+    const atFloor = target <= minAcceptablePrice + 0.5;
+    return hold(
+      atFloor ? 'RULE_14' : 'RULE_12',
+      atFloor ? 'BUYBOX_AT_FLOOR' : 'BUYBOX_STALE_HOLD',
+      atFloor
+        ? `Winning the Buy Box with no orders in 24 hours (${normally}), but ${money(
+            myPrice,
+          )} is already at the ${money(minAcceptablePrice)} floor — the price is protected, not adjustable.`
+        : `Winning the Buy Box with no orders in 24 hours (${normally}), but the ${evidence.signal} signal buys less than ₹1 of movement — leaving the price alone.`,
+      { demand: evidence, confidence: evidence.confidence },
+    );
+  }
+
+  /* ---- rule 13: the smallest cut the evidence pays for ------------------ */
+
+  const projected = currentSettlement + (target - myPrice);
+
+  // Belt and braces. `staleTarget` clamps to the floor and the floor is derived
+  // from the same identity, so this cannot trip — but a rounding change here
+  // must fail loudly into settlementUnsafe rather than quietly under the floor.
+  if (projected < minSettlement) {
+    return {
+      ...base,
+      demand: evidence,
+      confidence: evidence.confidence,
+      projectedSettlement: projected,
+      category: 'settlementUnsafe',
+      rule: 'RULE_9',
+      appliedRules: [...applied, 'RULE_1', 'RULE_13', 'RULE_2', 'RULE_9'],
+      reasonCode: 'BUYBOX_AT_FLOOR',
+      reason: `Dropping to ${money(target)} would settle at ${money(projected)}, below the minimum ${money(
+        minSettlement,
+      )} — the Buy Box is not worth defending at a loss.`,
+    };
+  }
+
+  const anchor =
+    benchmarkStatus === 'BENCHMARK_USABLE' && benchmarkPrice !== null && benchmarkPrice === target
+      ? ` That lands exactly on Flipkart's benchmark of ${money(benchmarkPrice)}.`
+      : '';
+
+  // Without this the sentence reads "a moderate signal (100% confidence)",
+  // which invites the reader to think one of the two numbers is wrong.
+  const damping =
+    evidence.damped && benchmarkPrice !== null
+      ? ` Stepped down one band because ${money(myPrice)} is already at or under the ${money(
+          benchmarkPrice,
+        )} benchmark, so price is the less likely cause.`
+      : '';
+
+  return {
+    ...base,
+    demand: evidence,
+    confidence: evidence.confidence,
+    recommendedPrice: target,
+    priceDelta: -cut,
+    projectedSettlement: projected,
+    category: 'priceChange',
+    rule: 'RULE_13',
+    appliedRules: [...applied, 'RULE_1', 'RULE_13', 'RULE_2'],
+    reasonCode: 'BUYBOX_STALE_REDUCE',
+    reason: `Winning the Buy Box but nothing sold in 24 hours, and ${normally} — a ${
+      evidence.signal
+    } signal (${Math.round(evidence.confidence * 100)}% confidence). Cutting ${money(cut)} (${(
+      (cut / myPrice) *
+      100
+    ).toFixed(1)}%) to ${money(target)}, which still settles at ${money(projected)} against a ${money(
+      minSettlement,
+    )} minimum.${anchor}${damping}`,
+  };
+}
+
+/**
+ * The smallest price cut worth making, given the evidence and the floor.
+ *
+ * Three constraints, applied in this order, and the order is the policy:
+ *
+ *   1. The benchmark is the destination when it is below us and affordable —
+ *      there is no reason to go past the price Flipkart itself calls competitive.
+ *   2. The evidence caps the step. A weak signal cannot authorise a 5% cut
+ *      however far away the benchmark is.
+ *   3. The floor wins over both, always.
+ *
+ * Rounded up, never down: rounding a ₹152.29 target to ₹152 would spend a rupee
+ * the evidence did not pay for, and "the smallest reduction that helps" means
+ * erring towards the higher price every time.
+ */
+function staleTarget(input: {
+  myPrice: number;
+  benchmarkPrice: number | null;
+  benchmarkUsable: boolean;
+  floor: number;
+  maxCut: number;
+}): number {
+  const { myPrice, benchmarkPrice, benchmarkUsable, floor, maxCut } = input;
+
+  const cutCap = myPrice * (1 - maxCut);
+  const chasingBenchmark = benchmarkUsable && benchmarkPrice !== null && benchmarkPrice < myPrice;
+  const desired = chasingBenchmark ? Math.max(benchmarkPrice, cutCap) : cutCap;
+
+  return Math.ceil(Math.max(desired, cutCap, floor));
+}
+
+/** Where the benchmark stands relative to the floor. Always answerable. */
+function classifyBenchmark(benchmarkPrice: number | null, floor: number | null): BenchmarkStatus {
+  if (benchmarkPrice === null) return 'BENCHMARK_MISSING';
+  // Flipkart writes 0 when it has no market read for a listing — an absence
+  // dressed as a number. Treating it as a price would recommend giving the
+  // product away, so it is never a price here.
+  if (benchmarkPrice <= 0) return 'BENCHMARK_ZERO';
+  if (floor !== null && benchmarkPrice < floor) return 'BELOW_THRESHOLD';
+  return 'BENCHMARK_USABLE';
 }
 
 /* ------------------------------------------------------------ aggregation */

@@ -162,15 +162,30 @@ export function validateUpload(text: string): ValidationReport {
     // value is a real mistake and blocks, since it would silently break the maths.
     const currentBankSettlement = parseBankField(record, 'currentBankSettlement', rowNumber, settlementInUse);
     const bankSettlementThreshold = parseBankField(record, 'bankSettlementThreshold', rowNumber, settlementInUse);
+    // The benchmark and the stock count never warn when absent: a listing sheet
+    // that predates those columns is a perfectly valid upload, and the rules
+    // that read them simply stand down. A present-but-junk value still blocks.
+    const benchmarkPrice = parseBankField(record, 'benchmarkPrice', rowNumber, false);
+    const stockCount = parseBankField(record, 'stockCount', rowNumber, false);
+
     if (currentBankSettlement.issue) issues.push(currentBankSettlement.issue);
     if (bankSettlementThreshold.issue) issues.push(bankSettlementThreshold.issue);
-    if (currentBankSettlement.issue?.severity === 'error' || bankSettlementThreshold.issue?.severity === 'error') {
+    if (benchmarkPrice.issue) issues.push(benchmarkPrice.issue);
+    if (stockCount.issue) issues.push(stockCount.issue);
+    if (
+      currentBankSettlement.issue?.severity === 'error' ||
+      bankSettlementThreshold.issue?.severity === 'error' ||
+      benchmarkPrice.issue?.severity === 'error' ||
+      stockCount.issue?.severity === 'error'
+    ) {
       return;
     }
     const enriched: ScrapeInput = {
       ...row,
       currentBankSettlement: currentBankSettlement.value,
       bankSettlementThreshold: bankSettlementThreshold.value,
+      benchmarkPrice: benchmarkPrice.value,
+      stockCount: stockCount.value,
     };
 
     // Duplicate identity is a correctness problem, not a style one: two rows
@@ -196,15 +211,15 @@ export function validateUpload(text: string): ValidationReport {
 }
 
 /**
- * Read one optional numeric settlement field off the raw record.
+ * Read one optional numeric field off the raw record.
  *
  * Accepts a number or a numeric string (Excel-to-JSON exports routinely quote
- * numbers). Absent → a non-blocking warning; present but not a finite number →
- * a blocking error.
+ * numbers). Absent → a non-blocking warning when `warnIfMissing`, otherwise
+ * silence; present but not a finite number → a blocking error.
  */
 function parseBankField(
   record: Record<string, unknown>,
-  field: 'currentBankSettlement' | 'bankSettlementThreshold',
+  field: 'currentBankSettlement' | 'bankSettlementThreshold' | 'benchmarkPrice' | 'stockCount',
   row: number,
   warnIfMissing: boolean,
 ): { value?: number; issue?: ValidationIssue } {

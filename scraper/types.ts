@@ -14,6 +14,14 @@ export interface ScrapeInput {
    */
   currentBankSettlement?: number;
   bankSettlementThreshold?: number;
+  /**
+   * Flipkart's own "Benchmark Price" for this listing — its system-generated
+   * read of a competitive price, from the same seller listing sheet. Zero is a
+   * real value in that column and means Flipkart has no read, not ₹0.
+   */
+  benchmarkPrice?: number;
+  /** "System Stock count". Zero orders on a zero-stock listing is not a price problem. */
+  stockCount?: number;
 }
 
 export type ScrapeStatus =

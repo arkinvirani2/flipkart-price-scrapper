@@ -158,7 +158,7 @@ export default function RecommendationsPage() {
         </Alert>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8">
         <Card className="p-4">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Account</p>
           <p className="mt-2 truncate text-lg font-semibold leading-tight" title={file.accountName}>
@@ -174,6 +174,22 @@ export default function RecommendationsPage() {
           <p className="tabular mt-2 text-lg font-semibold leading-tight">{formatDateTime(file.uploadTime)}</p>
           <p className="mt-1.5 truncate text-xs text-muted-foreground">
             Generated {formatDateTime(file.generatedAt)}
+          </p>
+        </Card>
+
+        <Card className="p-4">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Orders window
+          </p>
+          <p className="tabular mt-2 text-lg font-semibold leading-tight">
+            {file.ordersWindow ? `${file.ordersWindow.observedDays.toFixed(1)} days` : 'None'}
+          </p>
+          <p className="mt-1.5 truncate text-xs text-muted-foreground">
+            {file.ordersWindow
+              ? `${file.ordersWindow.units.toLocaleString('en-IN')} units to ${formatDateTime(
+                  file.ordersWindow.end,
+                )}`
+              : 'No orders report — Buy Box rows were left alone'}
           </p>
         </Card>
 

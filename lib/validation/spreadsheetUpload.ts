@@ -3,15 +3,23 @@ import type { ScrapeInput } from '@/scraper/types';
 
 const PRODUCT_URL_PREFIX = 'https://www.flipkart.com/product/p/itme?pid=';
 
-type SpreadsheetScrapeInput = Omit<ScrapeInput, 'currentBankSettlement' | 'bankSettlementThreshold'> & {
-  currentBankSettlement: string;
-  bankSettlementThreshold: string;
-};
+type NumericInputField =
+  | 'currentBankSettlement'
+  | 'bankSettlementThreshold'
+  | 'benchmarkPrice'
+  | 'stockCount';
+
+type SpreadsheetScrapeInput = Omit<ScrapeInput, NumericInputField> & Record<NumericInputField, string>;
 
 const FIELD_HEADERS = {
   sku: ['seller sku id', 'seller sku'],
   fsn: ['flipkart serial number', 'fsn'],
   currentBankSettlement: ['bank settlement'],
+  // Flipkart's own competitive price read, and the stock behind the listing.
+  // Both are optional: an older export without them still uploads, and the
+  // rules that read them simply do not fire.
+  benchmarkPrice: ['benchmark price'],
+  stockCount: ['system stock count', 'your stock count'],
 } as const;
 
 const THRESHOLD_HEADERS = {
@@ -94,6 +102,8 @@ function mapColumns(headerRow: unknown[]): Record<keyof typeof FIELD_HEADERS, nu
     sku: findColumn(headerRow, FIELD_HEADERS.sku),
     fsn: findColumn(headerRow, FIELD_HEADERS.fsn),
     currentBankSettlement: findColumn(headerRow, FIELD_HEADERS.currentBankSettlement),
+    benchmarkPrice: findColumn(headerRow, FIELD_HEADERS.benchmarkPrice),
+    stockCount: findColumn(headerRow, FIELD_HEADERS.stockCount),
   };
 }
 
@@ -135,6 +145,11 @@ function toScrapeInput(
     fsn,
     currentBankSettlement: cellText(row[columns.currentBankSettlement]),
     bankSettlementThreshold: thresholdByFsn.get(fsn) ?? '',
+    // findColumn returns -1 for a sheet that has no such column, and row[-1] is
+    // undefined, which cellText turns into '' — i.e. "not supplied", which is
+    // exactly how the validator treats an absent optional number.
+    benchmarkPrice: cellText(row[columns.benchmarkPrice]),
+    stockCount: cellText(row[columns.stockCount]),
   };
 }
 

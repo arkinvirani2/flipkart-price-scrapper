@@ -97,6 +97,68 @@ const WINNER_COLUMN: SortableColumn = {
     ),
 };
 
+/** Flipkart's own competitive read. Zero is "no benchmark", never a price. */
+const BENCHMARK_COLUMN: SortableColumn = {
+  key: 'benchmarkPrice',
+  header: 'Benchmark',
+  align: 'right',
+  sortValue: (item) => item.benchmarkPrice,
+  cell: (item) =>
+    item.benchmarkPrice ? (
+      formatPrice(item.benchmarkPrice)
+    ) : (
+      <span className="text-muted-foreground" title="Flipkart published no benchmark for this FSN">
+        —
+      </span>
+    ),
+};
+
+/** The zero-order test, and how much weight it carries. */
+const DEMAND_COLUMNS: SortableColumn[] = [
+  {
+    key: 'ordersLast24h',
+    header: '24h orders',
+    align: 'right',
+    sortValue: (item) => item.ordersLast24h,
+    cell: (item) =>
+      item.ordersLast24h === null ? (
+        <span className="text-muted-foreground" title="No orders report was uploaded with this batch">
+          —
+        </span>
+      ) : (
+        <span className={cn(item.ordersLast24h === 0 && 'font-medium text-status-failed')}>
+          {item.ordersLast24h}
+        </span>
+      ),
+  },
+  {
+    key: 'historicalUnitsPerDay',
+    header: 'Normal / day',
+    align: 'right',
+    sortValue: (item) => item.historicalUnitsPerDay,
+    cell: (item) =>
+      item.historicalUnitsPerDay === null ? (
+        <span className="text-muted-foreground">—</span>
+      ) : (
+        item.historicalUnitsPerDay.toFixed(2)
+      ),
+  },
+  {
+    key: 'confidence',
+    header: 'Confidence',
+    align: 'right',
+    sortValue: (item) => item.confidence,
+    // Only the Buy Box layer grades itself, so a bare 100% from a deterministic
+    // rule would read as a measurement it never took.
+    cell: (item) =>
+      item.demand ? (
+        `${Math.round(item.confidence * 100)}%`
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+  },
+];
+
 const REASON_COLUMN: SortableColumn = {
   key: 'reason',
   header: 'Reason',
@@ -129,6 +191,7 @@ const SETTLEMENT_COLUMNS: SortableColumn[] = [
 export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
   ...IDENTITY_COLUMNS,
   ...PRICE_COLUMNS,
+  BENCHMARK_COLUMN,
   {
     key: 'recommendedPrice',
     header: 'Recommended',
@@ -157,6 +220,7 @@ export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
     sortValue: (item) => item.minSettlement,
     cell: (item) => formatSettlement(item.minSettlement),
   },
+  ...DEMAND_COLUMNS,
   {
     key: 'rule',
     header: 'Rule',
@@ -193,7 +257,8 @@ export const SETTLEMENT_UNSAFE_COLUMNS: SortableColumn[] = [
 export const BUYBOX_WON_COLUMNS: SortableColumn[] = [
   ...IDENTITY_COLUMNS,
   ...PRICE_COLUMNS,
-  WINNER_COLUMN,
+  BENCHMARK_COLUMN,
+  ...DEMAND_COLUMNS,
   {
     key: 'buyboxWins',
     header: 'Past wins',
@@ -206,6 +271,7 @@ export const BUYBOX_WON_COLUMNS: SortableColumn[] = [
         `${item.history.buyboxWins}/${item.history.uploads}`
       ),
   },
+  REASON_COLUMN,
 ];
 
 export const NEEDS_REVIEW_COLUMNS: SortableColumn[] = [...IDENTITY_COLUMNS, ...PRICE_COLUMNS, REASON_COLUMN];
@@ -239,7 +305,7 @@ export function RecommendationTable({
     if (!needle) return rows;
 
     return rows.filter((item) =>
-      [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName]
+      [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName, item.reasonCode]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()

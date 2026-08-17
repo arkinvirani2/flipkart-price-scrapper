@@ -21,6 +21,7 @@ import {
   rewriteJournal,
 } from '@/scraper/journal';
 import { sellerNamesMatch } from '@/scraper/parser';
+import type { OrdersReport } from '@/lib/demand';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 import type {
   JobManifest,
@@ -57,6 +58,8 @@ export function createJob(
   inputs: ScrapeInput[],
   options: JobOptions,
   accountName?: string,
+  /** Per-FSN demand from the orders report, when one was uploaded with the batch. */
+  orders?: OrdersReport | null,
 ): JobManifest {
   ensureDataDir();
   const id = newJobId();
@@ -74,9 +77,21 @@ export function createJob(
     // fallback when the caller does not name it explicitly.
     accountName: (accountName ?? inputs[0]?.targetSeller ?? '').trim(),
     uploadTime: createdAt,
+    ordersWindow: orders
+      ? {
+          start: orders.windowStart,
+          end: orders.windowEnd,
+          last24hStart: orders.last24hStart,
+          observedDays: orders.observedDays,
+          orderItems: orders.totalOrderItems,
+          units: orders.totalUnits,
+          fsnCount: orders.fsnCount,
+        }
+      : undefined,
   };
 
   writeFileSync(jobPaths.inputs(id), JSON.stringify(inputs, null, 2), 'utf8');
+  if (orders) writeFileSync(jobPaths.orders(id), JSON.stringify(orders), 'utf8');
   writeManifest(manifest);
   // Create the journal up front so an interrupted job always has a file to read.
   if (!existsSync(jobPaths.journal(id))) writeFileSync(jobPaths.journal(id), '', 'utf8');
@@ -116,6 +131,8 @@ function buildRecord(manifest: JobManifest, inputs: ScrapeInput[], journal: Jour
       finishedAt: result?.finishedAt,
       currentBankSettlement: input.currentBankSettlement,
       bankSettlementThreshold: input.bankSettlementThreshold,
+      benchmarkPrice: input.benchmarkPrice,
+      stockCount: input.stockCount,
     };
   });
 
@@ -295,6 +312,26 @@ export function clearTransientRowStatuses(jobId: string): void {
 
 export function getRows(jobId: string): JobRow[] {
   return getJob(jobId)?.rows ?? [];
+}
+
+/**
+ * The orders report this batch was uploaded with, or null when it had none.
+ *
+ * Read from disk on demand rather than cached with the row index: it is only
+ * touched when recommendations are generated, and a stale copy of it would
+ * silently re-date "the last 24 hours".
+ */
+export function getOrdersReport(jobId: string): OrdersReport | null {
+  const path = jobPaths.orders(jobId);
+  if (!existsSync(path)) return null;
+
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as OrdersReport;
+  } catch {
+    // A torn file must read as "no orders report", never as "no orders" — the
+    // difference is a price cut on an FSN nobody measured.
+    return null;
+  }
 }
 
 /**

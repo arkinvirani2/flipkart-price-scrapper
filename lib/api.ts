@@ -15,6 +15,7 @@ import type {
   ScrapeInput,
 } from '@/types/dashboard';
 import type { ValidationReport } from '@/lib/validation/uploadSchema';
+import type { OrdersReport } from '@/lib/demand';
 // Type-only, so the server modules these live in are never pulled into the bundle.
 import type { AccountSummary } from '@/lib/store/jobStore';
 import type { RecommendationFile } from '@/lib/services/recommendations';
@@ -70,7 +71,7 @@ export type JobSummary = JobManifest & { stats: JobStats };
 
 // Re-exported so client components get these shapes from one place and never
 // reach into a server-only module themselves.
-export type { AccountSummary, RecommendationFile };
+export type { AccountSummary, RecommendationFile, OrdersReport };
 
 export const api = {
   listJobs: () => request<{ jobs: JobSummary[]; activeJobId: string | null }>('/api/jobs'),
@@ -89,6 +90,8 @@ export const api = {
     accountName: string;
     rows: ScrapeInput[];
     options?: Partial<JobOptions>;
+    /** Whatever validateUpload parsed out of the orders report, or null. */
+    orders?: OrdersReport | null;
   }) =>
     request<{ job: JobManifest; stats: JobStats }>('/api/jobs', {
       method: 'POST',
@@ -128,15 +131,16 @@ export const api = {
 
   analytics: (jobId: string) => request<AnalyticsPayload>(`/api/jobs/${jobId}/analytics`),
 
-  validateUpload: (file: File, thresholdFile: File, targetSeller: string) => {
+  validateUpload: (file: File, thresholdFile: File, targetSeller: string, ordersFile?: File | null) => {
     const form = new FormData();
     form.append('file', file);
     form.append('thresholdFile', thresholdFile);
     form.append('targetSeller', targetSeller);
-    return request<{ filename: string; report: ValidationReport }>('/api/upload', {
-      method: 'POST',
-      body: form,
-    });
+    if (ordersFile) form.append('ordersFile', ordersFile);
+    return request<{ filename: string; report: ValidationReport; orders: OrdersReport | null }>(
+      '/api/upload',
+      { method: 'POST', body: form },
+    );
   },
 
   retryRows: (jobId: string, indexes: number[]) =>

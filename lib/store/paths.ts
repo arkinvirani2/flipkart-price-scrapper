@@ -6,6 +6,7 @@
  *   data/jobs/<jobId>/results.ndjson   the scraper's own journal format
  *   data/jobs/<jobId>/logs.ndjson      log lines
  *   data/jobs/<jobId>/screenshots/     failure screenshots
+ *   data/jobs/<jobId>/orders.json      per-FSN demand from the orders report
  *   data/jobs/<jobId>/recommendations.json  the saved pricing recommendations
  *
  * Everything is under one directory so a job can be zipped, copied or deleted
@@ -51,6 +52,10 @@ export const jobPaths = {
   journal: (jobId: string) => join(jobDir(jobId), 'results.ndjson'),
   logs: (jobId: string) => join(jobDir(jobId), 'logs.ndjson'),
   screenshots: (jobId: string) => join(jobDir(jobId), 'screenshots'),
+  // The orders report reduced to per-FSN demand, written at upload. Kept with
+  // the batch rather than globally because "the last 24 hours" means the 24
+  // hours *this* upload was judged against, and that must not move later.
+  orders: (jobId: string) => join(jobDir(jobId), 'orders.json'),
   // Written once, when a run ends. Viewing an old upload reads this file rather
   // than re-deciding anything, so history never changes under the user.
   recommendations: (jobId: string) => join(jobDir(jobId), 'recommendations.json'),

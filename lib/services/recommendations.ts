@@ -20,17 +20,19 @@ import {
   summarizeHistory,
   summarizeRecommendations,
   EMPTY_HISTORY,
+  type DemandContext,
   type LearnedChoice,
   type LearnedMeta,
   type Recommendation,
   type RecommendationHistoryEntry,
   type RecommendationHistorySummary,
 } from '@/lib/recommendation';
+import { demandFor } from '@/lib/demand';
 import type { UploadDecision } from '@/lib/intelligence/engine';
 import { syncAccount } from '@/lib/intelligence/store';
-import { getJob, getRows, listJobs, sameAccount, updateManifest } from '@/lib/store/jobStore';
+import { getJob, getOrdersReport, getRows, listJobs, sameAccount, updateManifest } from '@/lib/store/jobStore';
 import { jobPaths } from '@/lib/store/paths';
-import type { JobRow, RecommendationCounts } from '@/types/dashboard';
+import type { JobRow, OrdersWindow, RecommendationCounts } from '@/types/dashboard';
 
 /** The shape of recommendations.json. */
 export interface RecommendationFile {
@@ -41,6 +43,8 @@ export interface RecommendationFile {
   generatedAt: string;
   /** How many previous uploads of this account were read to build the history. */
   historyJobs: number;
+  /** What the orders report covered, or null when the batch had none. */
+  ordersWindow: OrdersWindow | null;
   counts: RecommendationCounts;
   summary: string;
   recommendations: Recommendation[];
@@ -182,6 +186,11 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
   // each FSN's best-performing predictor says for this one.
   const learned = accountName ? syncAccount(accountName).decisions.get(jobId) : undefined;
 
+  // The orders report is per-batch and read once. `ordersAvailable` is what
+  // separates "this FSN sold nothing" from "nobody told us what it sold", and
+  // only the first of those may ever move a price.
+  const orders = getOrdersReport(jobId);
+
   const recommendations = record.rows.map((row: JobRow) => {
     const entries = history.get(row.fsn);
     for (const entry of entries ?? []) historyJobs.add(entry.jobId);
@@ -189,11 +198,16 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
     const settlement = computeSettlement(row);
     const summary = entries ? summarizeHistory(entries) : EMPTY_HISTORY;
 
+    const demandContext: DemandContext = orders
+      ? { ordersAvailable: true, demand: demandFor(orders, row.fsn), observedDays: orders.observedDays }
+      : { ordersAvailable: false, demand: null, observedDays: 0 };
+
     return recommendForRow(
       row,
       settlement,
       summary,
       learnedChoice(learned?.get(row.fsn), settlement, summary),
+      demandContext,
     );
   });
 
@@ -208,6 +222,7 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
     uploadTime: record.manifest.uploadTime ?? record.manifest.createdAt,
     generatedAt,
     historyJobs: historyJobs.size,
+    ordersWindow: record.manifest.ordersWindow ?? null,
     counts,
     summary,
     recommendations,

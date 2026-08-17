@@ -22,7 +22,7 @@ export const dynamic = 'force-dynamic';
 type Context = { params: Promise<{ jobId: string }> };
 
 function matchesSearch(item: Recommendation, needle: string): boolean {
-  return [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName]
+  return [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName, item.reasonCode]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()

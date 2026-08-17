@@ -19,7 +19,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { api } from '@/lib/api';
+import { api, type OrdersReport } from '@/lib/api';
+import { formatDateTime } from '@/lib/format';
 import { DEFAULT_JOB_OPTIONS, type JobOptions } from '@/types/dashboard';
 import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
 
@@ -30,8 +31,10 @@ export default function UploadPage() {
   const router = useRouter();
   const [listingFile, setListingFile] = useState<File | null>(null);
   const [thresholdFile, setThresholdFile] = useState<File | null>(null);
+  const [ordersFile, setOrdersFile] = useState<File | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
+  const [orders, setOrders] = useState<OrdersReport | null>(null);
   const [name, setName] = useState('');
   const [targetSeller, setTargetSeller] = useState('');
   const [options, setOptions] = useState<JobOptions>(DEFAULT_JOB_OPTIONS);
@@ -47,14 +50,16 @@ export default function UploadPage() {
   function resetReport() {
     setFilename(null);
     setReport(null);
+    setOrders(null);
   }
 
   const validate = useMutation({
-    mutationFn: ({ file, threshold }: { file: File; threshold: File }) =>
-      api.validateUpload(file, threshold, targetSeller.trim()),
+    mutationFn: ({ file, threshold, ordersReport }: { file: File; threshold: File; ordersReport: File | null }) =>
+      api.validateUpload(file, threshold, targetSeller.trim(), ordersReport),
     onSuccess: (data) => {
       setFilename(data.filename);
       setReport(data.report);
+      setOrders(data.orders);
       if (!name) setName(data.filename.replace(/\.(xlsx?|json)$/i, ''));
     },
   });
@@ -66,6 +71,7 @@ export default function UploadPage() {
         accountName: targetSeller.trim(),
         rows: report?.rows ?? [],
         options,
+        orders,
       }),
     onSuccess: ({ job }) => router.push(`/jobs/${job.id}`),
   });
@@ -173,11 +179,23 @@ export default function UploadPage() {
         description="Uses FSN and Minimum Bank Settlement price"
       />
 
+      <UploadDropzone
+        onFile={(file) => {
+          setOrdersFile(file);
+          setReport(null);
+          setOrders(null);
+        }}
+        disabled={validate.isPending || create.isPending || !targetSeller.trim()}
+        filename={ordersFile?.name ?? null}
+        title="Optional — drop the Flipkart orders report, or click to browse"
+        description="Uses FSN, order date and quantity. Without it, Buy Box rows are never re-priced."
+      />
+
       <Button
         type="button"
         onClick={() => {
           if (!listingFile || !thresholdFile) return;
-          validate.mutate({ file: listingFile, threshold: thresholdFile });
+          validate.mutate({ file: listingFile, threshold: thresholdFile, ordersReport: ordersFile });
         }}
         disabled={
           validate.isPending ||
@@ -205,6 +223,42 @@ export default function UploadPage() {
       )}
 
       {report && <ValidationReport report={report} />}
+
+      {report?.ok && (
+        <Alert variant={orders && orders.observedDays >= 7 ? 'default' : 'warning'}>
+          <AlertTitle>
+            {!orders
+              ? 'No orders report — Buy Box rows will not be re-priced'
+              : orders.observedDays >= 7
+                ? 'Orders report read'
+                : 'Orders report is too short to judge a quiet day'}
+          </AlertTitle>
+          <AlertDescription>
+            {orders ? (
+              <>
+                {orders.totalOrderItems.toLocaleString('en-IN')} order items covering{' '}
+                {orders.fsnCount} FSN{orders.fsnCount === 1 ? '' : 's'} over{' '}
+                {orders.observedDays.toFixed(1)} days, ending {formatDateTime(orders.windowEnd)}. The
+                &ldquo;last 24 hours&rdquo; is measured back from that, not from now.
+                {orders.observedDays < 7 && (
+                  <>
+                    {' '}
+                    Deciding whether zero orders is unusual needs to know what usual looks like, so
+                    the newest day is the test and everything before it is the baseline — download
+                    the last 30 days rather than the last 24 hours. Below a week of history the Buy
+                    Box rules stay conservative and will mostly leave prices alone.
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                Rules 11–14 need order activity to tell a Buy Box that is converting from one that is
+                not. Without the report, a row we already win is left alone exactly as before.
+              </>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       {report?.ok && (
         <Card>

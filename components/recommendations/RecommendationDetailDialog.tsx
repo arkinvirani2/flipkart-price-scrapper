@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { formatDateTime, formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
 import {
+  BENCHMARK_STATUS_LABEL,
   RECOMMENDATION_CATEGORY_LABEL,
   RULE_LABEL,
   type Recommendation,
@@ -50,6 +51,9 @@ function DetailBody({ item }: { item: Recommendation }) {
         <div className="flex flex-wrap items-center gap-2">
           <DialogTitle className="truncate">{item.sku}</DialogTitle>
           <Badge variant="secondary">{RECOMMENDATION_CATEGORY_LABEL[item.category]}</Badge>
+          <Badge variant="outline" className="font-mono text-[11px] font-normal">
+            {item.reasonCode}
+          </Badge>
         </div>
         <DialogDescription className="tabular">
           FSN {item.fsn} · {item.accountName}
@@ -84,15 +88,63 @@ function DetailBody({ item }: { item: Recommendation }) {
           />
         </section>
 
-        <section className="grid gap-3 sm:grid-cols-2">
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Figure
+            label="Benchmark price"
+            value={item.benchmarkPrice ? formatPrice(item.benchmarkPrice) : 'None published'}
+            tone={item.benchmarkStatus === 'BENCHMARK_USABLE' ? 'default' : 'muted'}
+            hint={BENCHMARK_STATUS_LABEL[item.benchmarkStatus]}
+          />
+          <Figure
+            label="Minimum acceptable price"
+            value={item.minAcceptablePrice === null ? 'Unprovable' : formatPrice(item.minAcceptablePrice)}
+            tone={item.minAcceptablePrice === null ? 'muted' : 'default'}
+            hint="The price at which the settlement hits its floor"
+          />
           <Figure
             label="Buy Box status"
             value={item.hasBuybox === null ? 'Unknown' : item.hasBuybox ? 'Won' : 'Lost'}
             tone={item.hasBuybox === null ? 'muted' : item.hasBuybox ? 'success' : 'default'}
             hint={item.winningSeller ? `Winner: ${item.winningSeller}` : 'No winning seller was read'}
           />
+        </section>
+
+        <section className="grid gap-3 sm:grid-cols-2">
+          <Figure
+            label="Orders in the last 24h"
+            value={
+              item.ordersLast24h === null
+                ? 'No orders report'
+                : `${item.ordersLast24h} unit${item.ordersLast24h === 1 ? '' : 's'}`
+            }
+            tone={
+              item.ordersLast24h === null ? 'muted' : item.ordersLast24h > 0 ? 'success' : 'failed'
+            }
+            hint={
+              item.historicalUnitsPerDay === null
+                ? 'Upload the Flipkart orders report to measure conversion'
+                : `Normally ${item.historicalUnitsPerDay.toFixed(2)} units/day`
+            }
+          />
           <Figure label="Rule applied" value={RULE_LABEL[item.rule]} small />
         </section>
+
+        {item.demand && (
+          <section className="rounded-lg border bg-muted/40 p-3">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Zero-order evidence
+            </h3>
+            <p className="mt-1.5 text-sm">
+              At {item.demand.unitsPerDay.toFixed(2)} units/day, a full day with no orders would
+              happen {(item.demand.zeroProbability * 100).toFixed(1)}% of the time by chance alone.
+              Across {item.demand.observedDays.toFixed(1)} days of orders that makes this a{' '}
+              <span className="font-medium">{item.demand.signal}</span> signal —{' '}
+              {Math.round(item.demand.confidence * 100)}% confidence.
+              {item.demand.damped &&
+                ' Stepped down one band because the price is already at or under the benchmark.'}
+            </p>
+          </section>
+        )}
 
         <section className="rounded-lg border bg-muted/40 p-3">
           <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">

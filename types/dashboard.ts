@@ -79,6 +79,23 @@ export interface RecommendationCounts {
   needsReview: number;
 }
 
+/**
+ * What the uploaded orders report covered.
+ *
+ * "Last 24 hours" is measured against the report's own newest order, not the
+ * wall clock — a report downloaded this morning still has a well-defined last
+ * day, and re-opening the batch next week must not silently empty it.
+ */
+export interface OrdersWindow {
+  start: string;
+  end: string;
+  last24hStart: string;
+  observedDays: number;
+  orderItems: number;
+  units: number;
+  fsnCount: number;
+}
+
 /** Persisted as job.json. The durable description of a batch. */
 export interface JobManifest {
   id: string;
@@ -101,6 +118,12 @@ export interface JobManifest {
   accountName?: string;
   /** When the spreadsheet was uploaded. Mirrors `createdAt` for older jobs. */
   uploadTime?: string;
+  /**
+   * Headline figures of the orders report this batch was judged against, when
+   * one was uploaded. Mirrored onto the manifest so a batch can say what its
+   * "last 24 hours" actually covered without opening orders.json.
+   */
+  ordersWindow?: OrdersWindow;
   /** Filled in once recommendations have been generated for this job. */
   recommendationCounts?: RecommendationCounts;
   recommendationSummary?: string;
@@ -135,6 +158,10 @@ export interface JobRow {
   /** Per-product settlement inputs, carried straight through from the inputs file. */
   currentBankSettlement?: number;
   bankSettlementThreshold?: number;
+  /** Flipkart's Benchmark Price for this listing. 0 means "no benchmark published". */
+  benchmarkPrice?: number;
+  /** System stock count, so a zero-order day can be blamed on the shelf, not the price. */
+  stockCount?: number;
 }
 
 /* ------------------------------------------------------------------- stats */

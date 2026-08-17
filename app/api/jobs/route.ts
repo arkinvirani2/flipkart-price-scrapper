@@ -9,6 +9,7 @@ import { ensureRecovered } from '@/lib/services/recovery';
 import { getRunner } from '@/lib/runner/jobRunner';
 import { validateUpload } from '@/lib/validation/uploadSchema';
 import { DEFAULT_JOB_OPTIONS, type JobOptions } from '@/types/dashboard';
+import type { OrdersReport } from '@/lib/demand';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -25,7 +26,13 @@ export async function GET() {
 export async function POST(request: Request) {
   ensureRecovered();
 
-  let body: { name?: string; accountName?: string; rows?: unknown; options?: Partial<JobOptions> };
+  let body: {
+    name?: string;
+    accountName?: string;
+    rows?: unknown;
+    options?: Partial<JobOptions>;
+    orders?: OrdersReport | null;
+  };
   try {
     body = await request.json();
   } catch {
@@ -44,7 +51,21 @@ export async function POST(request: Request) {
   // The account defaults to the seller name the rows already carry, so a client
   // that does not send one still lands in the right history.
   const accountName = (body.accountName ?? '').trim() || report.rows[0]?.targetSeller || '';
-  const manifest = createJob(name, report.rows, options, accountName);
+  const manifest = createJob(name, report.rows, options, accountName, ordersOrNull(body.orders));
 
   return NextResponse.json({ job: manifest, stats: computeStats(manifest.id) }, { status: 201 });
+}
+
+/**
+ * Accept an orders report only if it still looks like one.
+ *
+ * The client posts back what /api/upload parsed, so this is a round-trip check
+ * rather than a re-parse: anything without a window and an FSN index is dropped
+ * to null, because a malformed report reads downstream as universal zero demand.
+ */
+function ordersOrNull(orders: OrdersReport | null | undefined): OrdersReport | null {
+  if (!orders || typeof orders !== 'object') return null;
+  if (typeof orders.windowEnd !== 'string' || typeof orders.observedDays !== 'number') return null;
+  if (!orders.byFsn || typeof orders.byFsn !== 'object') return null;
+  return orders;
 }

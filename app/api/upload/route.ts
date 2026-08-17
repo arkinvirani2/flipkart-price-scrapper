@@ -7,8 +7,10 @@
  */
 
 import { NextResponse } from 'next/server';
+import { parseOrdersReport } from '@/lib/orders';
 import { validateUpload } from '@/lib/validation/uploadSchema';
 import { minimumSettlementByFsn, spreadsheetToScrapeRows } from '@/lib/validation/spreadsheetUpload';
+import type { OrdersReport } from '@/lib/demand';
 
 export const runtime = 'nodejs';
 
@@ -19,6 +21,9 @@ export async function POST(request: Request) {
   const contentType = request.headers.get('content-type') ?? '';
   let text: string;
   let filename = 'upload.xlsx';
+  // Optional third file. Absent is a supported outcome, not a degraded one: the
+  // Buy Box rules stand down and every other rule behaves exactly as before.
+  let orders: OrdersReport | null = null;
 
   try {
     if (contentType.includes('multipart/form-data')) {
@@ -74,6 +79,31 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
+      const ordersFile = form.get('ordersFile');
+      if (ordersFile && typeof ordersFile !== 'string' && typeof (ordersFile as Blob).text === 'function') {
+        const ordersBlob = ordersFile as Blob & { name?: string };
+        if (ordersBlob.size > MAX_BYTES) {
+          return NextResponse.json(
+            { error: `Orders report is ${(ordersBlob.size / 1024 / 1024).toFixed(1)}MB; the limit is 25MB.` },
+            { status: 413 },
+          );
+        }
+
+        orders = parseOrdersReport(await ordersBlob.arrayBuffer());
+        if (!orders) {
+          // Rejected rather than ignored. An orders report that silently parses
+          // to nothing reads downstream as "every FSN sold zero", which is the
+          // one input that can talk the rules into cutting prices.
+          return NextResponse.json(
+            {
+              error:
+                'The orders report contained no readable orders. It must have an "Orders" sheet with fsn and order_date columns.',
+            },
+            { status: 400 },
+          );
+        }
+      }
+
       const rows = spreadsheetToScrapeRows(await blob.arrayBuffer(), targetSeller, thresholdByFsn);
       text = JSON.stringify(rows);
     } else {
@@ -90,5 +120,5 @@ export async function POST(request: Request) {
   }
 
   const report = validateUpload(text);
-  return NextResponse.json({ filename, report });
+  return NextResponse.json({ filename, report, orders });
 }
