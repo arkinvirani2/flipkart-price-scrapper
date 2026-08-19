@@ -22,6 +22,12 @@ export interface ScrapeInput {
   benchmarkPrice?: number;
   /** "System Stock count". Zero orders on a zero-stock listing is not a price problem. */
   stockCount?: number;
+  /**
+   * The seller listing sheet's own "Your Listing Price" — the price as listed,
+   * which is not always the price the product page ends up showing. The scraper
+   * ignores it; it passes through for the recommendation's expected-price maths.
+   */
+  listingPrice?: number;
 }
 
 export type ScrapeStatus =

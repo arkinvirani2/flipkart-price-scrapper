@@ -13,6 +13,8 @@ import {
 import { formatDateTime, formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
 import {
   BENCHMARK_STATUS_LABEL,
+  currentListingPrice,
+  expectedListingPrice,
   RECOMMENDATION_CATEGORY_LABEL,
   RULE_LABEL,
   type Recommendation,
@@ -62,11 +64,11 @@ function DetailBody({ item }: { item: Recommendation }) {
 
       <div className="space-y-5">
         <section className="grid gap-3 sm:grid-cols-3">
-          <Figure label="Current price" value={formatPrice(item.currentPrice)} />
+          <Figure label="Current listing price" value={formatPrice(currentListingPrice(item))} />
           <Figure label="Winner price" value={formatPrice(item.winnerPrice)} />
           <Figure
-            label="Recommended price"
-            value={item.recommendedPrice === null ? 'No change' : formatPrice(item.recommendedPrice)}
+            label="Expected listing price"
+            value={item.recommendedPrice === null ? 'No change' : formatPrice(expectedListingPrice(item))}
             tone={item.recommendedPrice === null ? 'muted' : 'success'}
             hint={item.priceDelta === null ? undefined : `${formatSignedNumber(item.priceDelta)} vs current`}
           />
@@ -76,7 +78,7 @@ function DetailBody({ item }: { item: Recommendation }) {
           <Figure label="Current settlement" value={formatSettlement(item.currentSettlement)} />
           <Figure label="Minimum settlement" value={formatSettlement(item.minSettlement)} />
           <Figure
-            label="Projected settlement"
+            label="Expected settlement"
             value={formatSettlement(item.projectedSettlement)}
             tone={
               item.projectedSettlement === null || item.minSettlement === null

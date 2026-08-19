@@ -162,6 +162,8 @@ export interface JobRow {
   benchmarkPrice?: number;
   /** System stock count, so a zero-order day can be blamed on the shelf, not the price. */
   stockCount?: number;
+  /** The sheet's "Your Listing Price", carried through for the recommendation view. */
+  listingPrice?: number;
 }
 
 /* ------------------------------------------------------------------- stats */

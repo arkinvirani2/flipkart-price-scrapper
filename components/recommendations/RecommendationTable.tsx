@@ -12,7 +12,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
-import { RULE_LABEL, type Recommendation } from '@/lib/recommendation';
+import { currentListingPrice, expectedListingPrice, RULE_LABEL, type Recommendation } from '@/lib/recommendation';
 import { sellerListingUrl } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 
@@ -140,7 +140,7 @@ const DEMAND_COLUMNS: SortableColumn[] = [
       item.historicalUnitsPerDay === null ? (
         <span className="text-muted-foreground">—</span>
       ) : (
-        item.historicalUnitsPerDay.toFixed(2)
+        item.historicalUnitsPerDay?.toFixed(2)
       ),
   },
   {
@@ -190,15 +190,23 @@ const SETTLEMENT_COLUMNS: SortableColumn[] = [
 /** Column sets per tab — each one shows the figures that tab is actually about. */
 export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
   ...IDENTITY_COLUMNS,
-  ...PRICE_COLUMNS,
-  BENCHMARK_COLUMN,
+  // Not PRICE_COLUMNS: this tab quotes the price the seller actually edits — the
+  // sheet's own listing price — because that is what the change is applied to.
   {
-    key: 'recommendedPrice',
-    header: 'Recommended',
+    key: 'currentListingPrice',
+    header: 'Current listing price',
     align: 'right',
-    sortValue: (item) => item.recommendedPrice,
-    cell: (item) => <span className="font-semibold text-status-success">{formatPrice(item.recommendedPrice)}</span>,
+    sortValue: (item) => currentListingPrice(item),
+    cell: (item) => formatPrice(currentListingPrice(item)),
   },
+  {
+    key: 'winnerPrice',
+    header: 'Winner price',
+    align: 'right',
+    sortValue: (item) => item.winnerPrice,
+    cell: (item) => formatPrice(item.winnerPrice),
+  },
+  BENCHMARK_COLUMN,
   {
     key: 'priceDelta',
     header: 'Change',
@@ -207,11 +215,24 @@ export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
     cell: (item) => <span className="font-medium">{formatSignedNumber(item.priceDelta)}</span>,
   },
   {
+    key: 'expectedListingPrice',
+    header: 'Expected listing price',
+    align: 'right',
+    sortValue: (item) => expectedListingPrice(item),
+    cell: (item) => (
+      <span className="font-semibold text-status-success">{formatPrice(expectedListingPrice(item))}</span>
+    ),
+  },
+  {
     key: 'projectedSettlement',
-    header: 'Projected settlement',
+    header: 'Expected settlement',
     align: 'right',
     sortValue: (item) => item.projectedSettlement,
-    cell: (item) => formatSettlement(item.projectedSettlement),
+    // Same treatment as the expected price beside it: the two "expected" figures
+    // are the outcome this tab is proposing, so they read as one pair.
+    cell: (item) => (
+      <span className="font-semibold text-status-success">{formatSettlement(item.projectedSettlement)}</span>
+    ),
   },
   {
     key: 'minSettlement',

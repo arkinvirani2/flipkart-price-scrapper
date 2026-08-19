@@ -7,7 +7,8 @@ type NumericInputField =
   | 'currentBankSettlement'
   | 'bankSettlementThreshold'
   | 'benchmarkPrice'
-  | 'stockCount';
+  | 'stockCount'
+  | 'listingPrice';
 
 type SpreadsheetScrapeInput = Omit<ScrapeInput, NumericInputField> & Record<NumericInputField, string>;
 
@@ -20,6 +21,11 @@ const FIELD_HEADERS = {
   // rules that read them simply do not fire.
   benchmarkPrice: ['benchmark price'],
   stockCount: ['system stock count', 'your stock count'],
+  // The price the seller actually edits on the listing. Flipkart's own export
+  // titles this column "Your Selling Price"; other exports and hand-made sheets
+  // say "Your Listing Price". Ordered by preference — see findColumnInOrder — so
+  // the qualified headers win over the bare ones when a sheet carries both.
+  listingPrice: ['your selling price', 'your listing price', 'selling price', 'listing price'],
 } as const;
 
 const THRESHOLD_HEADERS = {
@@ -104,11 +110,34 @@ function mapColumns(headerRow: unknown[]): Record<keyof typeof FIELD_HEADERS, nu
     currentBankSettlement: findColumn(headerRow, FIELD_HEADERS.currentBankSettlement),
     benchmarkPrice: findColumn(headerRow, FIELD_HEADERS.benchmarkPrice),
     stockCount: findColumn(headerRow, FIELD_HEADERS.stockCount),
+    listingPrice: findColumnInOrder(headerRow, FIELD_HEADERS.listingPrice),
   };
 }
 
 function findColumn(headerRow: unknown[], names: readonly string[]): number {
   return headerRow.findIndex((cell) => names.includes(normalizeHeader(cell)));
+}
+
+/**
+ * Like findColumn, but the alias order decides the winner rather than the column
+ * order — the first name that matches anything wins. Use where two aliases could
+ * both be present and one of them is the more specific reading.
+ */
+function findColumnInOrder(headerRow: unknown[], names: readonly string[]): number {
+  for (const name of names) {
+    const exact = headerRow.findIndex((cell) => normalizeHeader(cell) === name);
+    if (exact !== -1) return exact;
+  }
+  // Only once nothing matches cleanly: sheets decorate this header often enough
+  // ("Your Listing Price (Incl. taxes)") that an exact-only match would silently
+  // drop the column and leave the expected price quoted against the page price.
+  // Prefix rather than substring, so a neighbouring "Minimum Listing Price"
+  // can never be read as this one.
+  for (const name of names) {
+    const prefixed = headerRow.findIndex((cell) => normalizeHeader(cell).startsWith(name + ' '));
+    if (prefixed !== -1) return prefixed;
+  }
+  return -1;
 }
 
 function hasAny(values: string[], names: readonly string[]): boolean {
@@ -150,6 +179,7 @@ function toScrapeInput(
     // exactly how the validator treats an absent optional number.
     benchmarkPrice: cellText(row[columns.benchmarkPrice]),
     stockCount: cellText(row[columns.stockCount]),
+    listingPrice: cellText(row[columns.listingPrice]),
   };
 }
 

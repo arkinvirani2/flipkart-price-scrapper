@@ -167,16 +167,19 @@ export function validateUpload(text: string): ValidationReport {
     // that read them simply stand down. A present-but-junk value still blocks.
     const benchmarkPrice = parseBankField(record, 'benchmarkPrice', rowNumber, false);
     const stockCount = parseBankField(record, 'stockCount', rowNumber, false);
+    const listingPrice = parseBankField(record, 'listingPrice', rowNumber, false);
 
     if (currentBankSettlement.issue) issues.push(currentBankSettlement.issue);
     if (bankSettlementThreshold.issue) issues.push(bankSettlementThreshold.issue);
     if (benchmarkPrice.issue) issues.push(benchmarkPrice.issue);
     if (stockCount.issue) issues.push(stockCount.issue);
+    if (listingPrice.issue) issues.push(listingPrice.issue);
     if (
       currentBankSettlement.issue?.severity === 'error' ||
       bankSettlementThreshold.issue?.severity === 'error' ||
       benchmarkPrice.issue?.severity === 'error' ||
-      stockCount.issue?.severity === 'error'
+      stockCount.issue?.severity === 'error' ||
+      listingPrice.issue?.severity === 'error'
     ) {
       return;
     }
@@ -186,6 +189,7 @@ export function validateUpload(text: string): ValidationReport {
       bankSettlementThreshold: bankSettlementThreshold.value,
       benchmarkPrice: benchmarkPrice.value,
       stockCount: stockCount.value,
+      listingPrice: listingPrice.value,
     };
 
     // Duplicate identity is a correctness problem, not a style one: two rows
@@ -219,7 +223,7 @@ export function validateUpload(text: string): ValidationReport {
  */
 function parseBankField(
   record: Record<string, unknown>,
-  field: 'currentBankSettlement' | 'bankSettlementThreshold' | 'benchmarkPrice' | 'stockCount',
+  field: 'currentBankSettlement' | 'bankSettlementThreshold' | 'benchmarkPrice' | 'stockCount' | 'listingPrice',
   row: number,
   warnIfMissing: boolean,
 ): { value?: number; issue?: ValidationIssue } {

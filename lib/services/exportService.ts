@@ -9,7 +9,7 @@
 
 // Type-only, so exceljs itself is still loaded lazily by the two writers below.
 import type { Workbook } from 'exceljs';
-import { RULE_LABEL, type Recommendation } from '@/lib/recommendation';
+import { currentListingPrice, expectedListingPrice, RULE_LABEL, type Recommendation } from '@/lib/recommendation';
 import { computeSettlement, SETTLEMENT_CATEGORY_LABEL, sellerListingUrl } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
@@ -235,15 +235,16 @@ const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
   { header: 'FSN', width: 20, value: (item) => item.fsn },
   { header: 'Account', width: 20, value: (item) => item.accountName },
   { header: 'Current Price', width: 14, value: (item) => item.currentPrice },
+  { header: 'Current Listing Price', width: 20, value: (item) => currentListingPrice(item) },
   { header: 'Winner Price', width: 14, value: (item) => item.winnerPrice },
   { header: 'Winning Seller', width: 22, value: (item) => item.winningSeller },
   { header: 'Benchmark Price', width: 16, value: (item) => item.benchmarkPrice },
   { header: 'Minimum Acceptable Price', width: 23, value: (item) => round2(item.minAcceptablePrice) },
-  { header: 'Recommended Price', width: 18, value: (item) => item.recommendedPrice },
+  { header: 'Expected Listing Price', width: 21, value: (item) => expectedListingPrice(item) },
   { header: 'Price Change', width: 14, value: (item) => item.priceDelta },
   { header: 'Current Settlement', width: 18, value: (item) => round2(item.currentSettlement) },
   { header: 'Minimum Settlement', width: 19, value: (item) => round2(item.minSettlement) },
-  { header: 'Projected Settlement', width: 20, value: (item) => round2(item.projectedSettlement) },
+  { header: 'Expected Settlement', width: 20, value: (item) => round2(item.projectedSettlement) },
   {
     header: 'Buybox',
     width: 10,

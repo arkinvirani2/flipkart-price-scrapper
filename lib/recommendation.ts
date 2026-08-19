@@ -369,6 +369,12 @@ export interface Recommendation {
 
   /** My listing price as scraped. */
   currentPrice: number | null;
+  /**
+   * The sheet's own "Your Listing Price" for this SKU. Null when the upload had
+   * no such column — the page price is what the rules read, so this is carried
+   * purely so the expected price is quoted against the number the seller edits.
+   */
+  listingPrice: number | null;
   /** The price Flipkart headlines — the Buy Box price. */
   winnerPrice: number | null;
   winningSeller: string | null;
@@ -416,6 +422,27 @@ export interface Recommendation {
   history: RecommendationHistorySummary;
   /** Present once the FSN has enough scored predictions to rank its rules. */
   learned?: LearnedMeta;
+}
+
+/**
+ * The listing price this recommendation starts from: the sheet's "Your Listing
+ * Price" when the upload carried that column, and the scraped page price
+ * otherwise, so uploads made before the column existed still show a figure.
+ */
+export function currentListingPrice(item: Recommendation): number | null {
+  return item.listingPrice ?? item.currentPrice;
+}
+
+/**
+ * The listing price a recommendation would leave behind: the current listing
+ * price plus the Change. Derived rather than stored, so it can never drift from
+ * the `priceDelta` shown beside it. Null whenever either half is missing — an
+ * unknown price plus a known change is still unknown.
+ */
+export function expectedListingPrice(item: Recommendation): number | null {
+  const listed = currentListingPrice(item);
+  if (listed === null || item.priceDelta === null) return null;
+  return listed + item.priceDelta;
 }
 
 /**
@@ -561,6 +588,7 @@ export function recommendForRow(
     accountName: row.targetSeller,
     productUrl: row.productUrl,
     currentPrice: myPrice,
+    listingPrice: row.listingPrice ?? null,
     winnerPrice,
     winningSeller: row.result?.buyboxSellerName ?? null,
     recommendedPrice: null as number | null,
