@@ -9,7 +9,15 @@
 
 // Type-only, so exceljs itself is still loaded lazily by the two writers below.
 import type { Workbook } from 'exceljs';
-import { currentListingPrice, expectedListingPrice, RULE_LABEL, type Recommendation } from '@/lib/recommendation';
+import {
+  currentListingPrice,
+  expectedBankSettlement,
+  expectedListingPrice,
+  expectedListingPriceAtRecommendation,
+  priceDifference,
+  RULE_LABEL,
+  type Recommendation,
+} from '@/lib/recommendation';
 import { computeSettlement, SETTLEMENT_CATEGORY_LABEL, sellerListingUrl } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
@@ -234,17 +242,35 @@ const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
   { header: 'SKU', width: 18, value: (item) => item.sku },
   { header: 'FSN', width: 20, value: (item) => item.fsn },
   { header: 'Account', width: 20, value: (item) => item.accountName },
-  { header: 'Current Price', width: 14, value: (item) => item.currentPrice },
+  {
+    header: 'Flipkart Displayed Our Listing Price',
+    width: 34,
+    value: (item) => item.currentPrice,
+  },
   { header: 'Current Listing Price', width: 20, value: (item) => currentListingPrice(item) },
   { header: 'Winner Price', width: 14, value: (item) => item.winnerPrice },
   { header: 'Winning Seller', width: 22, value: (item) => item.winningSeller },
   { header: 'Benchmark Price', width: 16, value: (item) => item.benchmarkPrice },
   { header: 'Minimum Acceptable Price', width: 23, value: (item) => round2(item.minAcceptablePrice) },
+  // Difference, then the two figures derived from it by addition. Kept next to
+  // each other so the sheet shows the sum, not just its result.
+  { header: 'Difference', width: 13, value: (item) => round2(priceDifference(item)) },
   { header: 'Expected Listing Price', width: 21, value: (item) => expectedListingPrice(item) },
+  { header: 'Expected Bank Settlement', width: 24, value: (item) => round2(expectedBankSettlement(item)) },
+  // The price to set, and its own move away from the Flipkart displayed price.
+  // On a Buy Box row priced off the benchmark these are the only two columns
+  // that describe the recommendation — the winner-based Difference above is zero
+  // there, because on those rows the winner is us.
+  { header: 'Recommended Price', width: 18, value: (item) => item.recommendedPrice },
   { header: 'Price Change', width: 14, value: (item) => item.priceDelta },
+  {
+    header: 'Expected Listing Price At Recommendation',
+    width: 38,
+    value: (item) => expectedListingPriceAtRecommendation(item),
+  },
   { header: 'Current Settlement', width: 18, value: (item) => round2(item.currentSettlement) },
   { header: 'Minimum Settlement', width: 19, value: (item) => round2(item.minSettlement) },
-  { header: 'Expected Settlement', width: 20, value: (item) => round2(item.projectedSettlement) },
+  { header: 'Settlement At Recommended Price', width: 30, value: (item) => round2(item.projectedSettlement) },
   {
     header: 'Buybox',
     width: 10,

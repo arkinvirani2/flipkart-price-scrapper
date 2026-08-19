@@ -14,7 +14,9 @@ import { formatDateTime, formatPrice, formatSettlement, formatSignedNumber } fro
 import {
   BENCHMARK_STATUS_LABEL,
   currentListingPrice,
+  expectedBankSettlement,
   expectedListingPrice,
+  priceDifference,
   RECOMMENDATION_CATEGORY_LABEL,
   RULE_LABEL,
   type Recommendation,
@@ -64,28 +66,60 @@ function DetailBody({ item }: { item: Recommendation }) {
 
       <div className="space-y-5">
         <section className="grid gap-3 sm:grid-cols-3">
-          <Figure label="Current listing price" value={formatPrice(currentListingPrice(item))} />
-          <Figure label="Winner price" value={formatPrice(item.winnerPrice)} />
+          <Figure label="Current listing price" value={formatPrice(currentListingPrice(item))} hint="From the listing sheet" />
+          <Figure
+            label="Flipkart displayed price"
+            value={formatPrice(item.currentPrice)}
+            hint="What Flipkart shows for our listing"
+          />
+          <Figure
+            label="Winner price"
+            value={formatPrice(item.winnerPrice)}
+            hint={item.winningSeller ? `Winner: ${item.winningSeller}` : 'No winning seller was read'}
+          />
+        </section>
+
+        {/* The calculation, in the order it is done: the Difference is added to
+            the current listing price and to the current bank settlement. */}
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Figure
+            label="Change"
+            value={formatSignedNumber(priceDifference(item))}
+            hint="Winner price − Flipkart displayed price"
+          />
           <Figure
             label="Expected listing price"
-            value={item.recommendedPrice === null ? 'No change' : formatPrice(expectedListingPrice(item))}
-            tone={item.recommendedPrice === null ? 'muted' : 'success'}
-            hint={item.priceDelta === null ? undefined : `${formatSignedNumber(item.priceDelta)} vs current`}
+            value={formatPrice(expectedListingPrice(item))}
+            tone={priceDifference(item) === null ? 'muted' : 'success'}
+            hint="Current listing price + change"
+          />
+          <Figure
+            label="Expected bank settlement"
+            value={formatSettlement(expectedBankSettlement(item))}
+            tone={priceDifference(item) === null ? 'muted' : 'success'}
+            hint="Current bank settlement + change"
           />
         </section>
 
         <section className="grid gap-3 sm:grid-cols-3">
-          <Figure label="Current settlement" value={formatSettlement(item.currentSettlement)} />
-          <Figure label="Minimum settlement" value={formatSettlement(item.minSettlement)} />
+          <Figure label="Current bank settlement" value={formatSettlement(item.currentSettlement)} />
+          <Figure label="Minimum bank settlement" value={formatSettlement(item.minSettlement)} />
           <Figure
-            label="Expected settlement"
-            value={formatSettlement(item.projectedSettlement)}
+            label="Settlement at recommended price"
+            value={item.recommendedPrice === null ? 'No change' : formatSettlement(item.projectedSettlement)}
             tone={
               item.projectedSettlement === null || item.minSettlement === null
                 ? 'default'
                 : item.projectedSettlement >= item.minSettlement
                   ? 'success'
                   : 'failed'
+            }
+            hint={
+              item.recommendedPrice === null
+                ? undefined
+                : `${formatPrice(item.recommendedPrice)}${
+                    item.priceDelta === null ? '' : ` · ${formatSignedNumber(item.priceDelta)} vs Flipkart displayed`
+                  }`
             }
           />
         </section>

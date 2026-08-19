@@ -73,7 +73,7 @@ export const RULE_LABEL: Record<RuleId, string> = {
   RULE_2: 'Rule 2 — never below minimum settlement',
   RULE_3: 'Rule 3 — already matching the winner price',
   RULE_4: 'Rule 4 — match the winner price',
-  RULE_5: 'Rule 5 — winner is dearer, keep the current price',
+  RULE_5: 'Rule 5 — winner is dearer, raise to the winner price',
   RULE_6: 'Rule 6 — prefer a historically proven winning price',
   RULE_7: 'Rule 7 — undercut by ₹1 after five uploads without the Buy Box',
   RULE_8: 'Rule 8 — recommendation equals the current price',
@@ -81,7 +81,7 @@ export const RULE_LABEL: Record<RuleId, string> = {
   RULE_10: 'Rule 10 — no history, current upload only',
   RULE_11: 'Rule 11 — Buy Box with orders, or none to be had',
   RULE_12: 'Rule 12 — Buy Box with no orders, too little evidence to act',
-  RULE_13: 'Rule 13 — Buy Box with no orders, smallest useful price cut',
+  RULE_13: 'Rule 13 — Buy Box with no orders, benchmark or smallest useful move',
   RULE_14: 'Rule 14 — Buy Box with no orders, already at the price floor',
   LEARNED: 'Learned — this FSN’s best-performing predictor',
   NO_DATA: 'No usable scrape data',
@@ -378,6 +378,19 @@ export interface Recommendation {
   /** The price Flipkart headlines — the Buy Box price. */
   winnerPrice: number | null;
   winningSeller: string | null;
+  /**
+   * Winner Price − Flipkart Displayed Our Listing Price.
+   *
+   * The `Change` the UI shows, and the figure that is *added* to the current
+   * listing price and to the current bank settlement to get the expected ones.
+   * Negative when the winner undercuts us, which is the direction that makes the
+   * addition move the price down towards the winner.
+   *
+   * Independent of whether a price change is recommended — it describes where we
+   * sit against the winner, not what any rule decided. Null when either price is
+   * missing.
+   */
+  difference: number | null;
   /** Null whenever no change is being recommended. */
   recommendedPrice: number | null;
   /** recommendedPrice − currentPrice. Null without a recommendation. */
@@ -434,15 +447,144 @@ export function currentListingPrice(item: Recommendation): number | null {
 }
 
 /**
- * The listing price a recommendation would leave behind: the current listing
- * price plus the Change. Derived rather than stored, so it can never drift from
- * the `priceDelta` shown beside it. Null whenever either half is missing — an
- * unknown price plus a known change is still unknown.
+ * The Difference: Winner Price − Flipkart Displayed Our Listing Price.
+ *
+ * Read through this rather than straight off the field. A saved recommendations
+ * file is never re-decided on the way in, so one written by an older build
+ * carries whatever that build stored — or nothing at all. Both prices are on the
+ * record either way, and the Difference is only ever this subtraction of them,
+ * so recomputing is both the same answer and a self-correcting one. The stored
+ * field is the fallback, for the rows where a price is missing.
+ */
+export function priceDifference(item: Recommendation): number | null {
+  if (item.currentPrice !== null && item.winnerPrice !== null) {
+    return item.winnerPrice - item.currentPrice;
+  }
+  return item.difference ?? null;
+}
+
+/**
+ * The listing price a recommendation would leave behind:
+ *
+ *     Expected Listing Price = Current Listing Price + Difference
+ *
+ * The Difference is *added*, never subtracted. Derived rather than stored, so it
+ * can never drift from the Change shown beside it. Null whenever either half is
+ * missing — an unknown price plus a known change is still unknown.
  */
 export function expectedListingPrice(item: Recommendation): number | null {
   const listed = currentListingPrice(item);
+  const difference = priceDifference(item);
+  if (listed === null || difference === null) return null;
+  return listed + difference;
+}
+
+/**
+ * The bank settlement that goes with the expected listing price:
+ *
+ *     Expected Bank Settlement = Current Bank Settlement + Difference
+ *
+ * Added, like the price above, and for the same reason: the two "expected"
+ * figures are one pair, read off the same Difference.
+ *
+ * Distinct from `projectedSettlement`, which answers a different question — what
+ * the *recommended price* would settle at — and is what the minimum-settlement
+ * gate is judged on. The two are deliberately not merged.
+ */
+export function expectedBankSettlement(item: Recommendation): number | null {
+  const difference = priceDifference(item);
+  if (item.currentSettlement === null || difference === null) return null;
+  return item.currentSettlement + difference;
+}
+
+/**
+ * The same expected listing price, measured from the recommendation instead of
+ * from the winner:
+ *
+ *     Expected Listing Price = Current Listing Price + (recommended − displayed)
+ *
+ * For the Buy Box lists. On a row we already win, the winner *is* us, so the
+ * winner-based Change is zero and tells the reader nothing. What moves the price
+ * there is the recommendation — Flipkart's benchmark, or whatever the zero-order
+ * rules chose — so those tabs quote their Change and expected figures against
+ * `priceDelta`, and `projectedSettlement` is already the matching settlement.
+ */
+export function expectedListingPriceAtRecommendation(item: Recommendation): number | null {
+  const listed = currentListingPrice(item);
   if (listed === null || item.priceDelta === null) return null;
   return listed + item.priceDelta;
+}
+
+/** What the Settlement unsafe list quotes in place of an unaffordable winner. */
+export interface SettlementUnsafeTarget {
+  /** True when the benchmark cleared the minimum-settlement check. */
+  benchmarkUsable: boolean;
+  /** The price standing in for the winner. Null when neither answer is derivable. */
+  target: number | null;
+  /** target − Flipkart displayed price. This list's Change. */
+  change: number | null;
+  expectedListingPrice: number | null;
+  expectedBankSettlement: number | null;
+}
+
+/**
+ * The Settlement unsafe list's own figures.
+ *
+ * These are the rows where matching the winner would settle under the minimum,
+ * so the winner price is not something anyone can act on and every figure
+ * derived from it would be advice to lose money. Two answers replace it:
+ *
+ *   Benchmark Price − Fees > Minimum Bank Settlement
+ *       → the benchmark stands in as the winner price, and the Change and both
+ *         expected figures are derived from it exactly as they would be from a
+ *         real winner — `change` is what makes that one substitution flow
+ *         through all three.
+ *
+ *   otherwise
+ *       → the floor itself. The price is Minimum Bank Settlement + Fees, which
+ *         is `minAcceptablePrice`, and it settles at exactly the Minimum Bank
+ *         Settlement. Both are stated rather than derived, because the floor is
+ *         defined by the settlement it lands on, not by any market price.
+ *
+ * The check needs the settlement values: `BENCHMARK_USABLE` on its own can also
+ * mean "there was no floor to test the benchmark against", which is not the same
+ * as passing the test.
+ *
+ * This is presentation, not a rule — the row keeps the category and the rule the
+ * engine gave it, and stays on the Settlement unsafe list either way.
+ */
+export function settlementUnsafeTarget(item: Recommendation): SettlementUnsafeTarget {
+  const benchmarkUsable =
+    item.benchmarkStatus === 'BENCHMARK_USABLE' &&
+    item.benchmarkPrice !== null &&
+    item.benchmarkPrice > 0 &&
+    item.minAcceptablePrice !== null;
+
+  if (benchmarkUsable) {
+    const target = item.benchmarkPrice as number;
+    const change = item.currentPrice === null ? null : target - item.currentPrice;
+    const listed = currentListingPrice(item);
+
+    return {
+      benchmarkUsable: true,
+      target,
+      change,
+      expectedListingPrice: listed === null || change === null ? null : listed + change,
+      expectedBankSettlement:
+        item.currentSettlement === null || change === null ? null : item.currentSettlement + change,
+    };
+  }
+
+  return {
+    benchmarkUsable: false,
+    target: item.minAcceptablePrice,
+    change:
+      item.minAcceptablePrice === null || item.currentPrice === null
+        ? null
+        : item.minAcceptablePrice - item.currentPrice,
+    expectedListingPrice: item.minAcceptablePrice,
+    expectedBankSettlement: item.minSettlement,
+  };
 }
 
 /**
@@ -543,6 +685,27 @@ export function staticRuleTarget(
 }
 
 /**
+ * What the normal calculation — the first three tabs' conditions — recommends.
+ *
+ * Null when the winner is not below us, because there is then no price to chase
+ * down to; otherwise the target rules 4/6/7 chose, or the learned one that
+ * replaces them. Used by the Tab 4 path, which has to ask this question without
+ * the settlement values that the ordinary route would gate the answer on.
+ *
+ * Rule 5's raise is deliberately not offered here: Tab 4 is a row whose Buy Box
+ * we already hold, so the winner is us, and there is no one to raise towards.
+ */
+function normalTarget(
+  myPrice: number,
+  winnerPrice: number,
+  history: RecommendationHistorySummary,
+  learned?: LearnedChoice,
+): TargetChoice | null {
+  if (winnerPrice >= myPrice) return null;
+  return learned ?? staticRuleTarget(myPrice, winnerPrice, history);
+}
+
+/**
  * Apply the rules to one scraped row.
  *
  * `settlement` is the existing settlement calculation for the same row — passed
@@ -591,6 +754,10 @@ export function recommendForRow(
     listingPrice: row.listingPrice ?? null,
     winnerPrice,
     winningSeller: row.result?.buyboxSellerName ?? null,
+    // Winner Price − Flipkart Displayed Our Listing Price. Computed once, here,
+    // so every outcome below carries the same Difference whether or not its rule
+    // recommended a price.
+    difference: myPrice !== null && winnerPrice !== null ? winnerPrice - myPrice : null,
     recommendedPrice: null as number | null,
     priceDelta: null as number | null,
     currentSettlement,
@@ -654,6 +821,9 @@ export function recommendForRow(
       base,
       applied,
       myPrice,
+      winnerPrice,
+      history,
+      learned,
       currentSettlement,
       minSettlement,
       minAcceptablePrice,
@@ -680,16 +850,30 @@ export function recommendForRow(
 
   /* ---- rule 5: the winner is dearer than us ----------------------------- */
 
+  // A winner priced above us is margin left on the table: we are already the
+  // cheaper offer, so the price can rise to meet theirs without becoming the
+  // dearer one. That makes this a price change, not a row to tick off — its
+  // Change is positive and its expected listing price sits above the current.
+  //
+  // No settlement gate on the way out: raising a price can only raise the
+  // settlement with it, so rules 2 and 9 have nothing here to veto.
   if (winnerPrice > myPrice) {
+    const projected = currentSettlement === null ? null : currentSettlement + (winnerPrice - myPrice);
+
     return {
       ...base,
-      category: 'alreadyCorrect',
+      recommendedPrice: winnerPrice,
+      priceDelta: winnerPrice - myPrice,
+      projectedSettlement: projected,
+      category: 'priceChange',
       rule: 'RULE_5',
       appliedRules: [...applied, 'RULE_5'],
       reasonCode: benchmarkStatus,
+      // Deterministic, like the other rules that set a price outright.
+      confidence: 1,
       reason: `Winner price ${money(winnerPrice)} is above my price ${money(
         myPrice,
-      )} — keeping the current price.`,
+      )} — raising to ${money(winnerPrice)} takes the margin currently being left on the table.`,
     };
   }
 
@@ -767,6 +951,10 @@ interface BuyboxInput {
   base: Omit<Recommendation, 'category' | 'rule' | 'appliedRules' | 'reasonCode' | 'reason'>;
   applied: RuleId[];
   myPrice: number;
+  /** Needed by the Tab 4 path, which re-asks the first three tabs' question. */
+  winnerPrice: number;
+  history: RecommendationHistorySummary;
+  learned?: LearnedChoice;
   currentSettlement: number | null;
   minSettlement: number | null;
   minAcceptablePrice: number | null;
@@ -795,6 +983,9 @@ function decideWithBuybox(input: BuyboxInput): Recommendation {
     base,
     applied,
     myPrice,
+    winnerPrice,
+    history,
+    learned,
     currentSettlement,
     minSettlement,
     minAcceptablePrice,
@@ -863,6 +1054,57 @@ function decideWithBuybox(input: BuyboxInput): Recommendation {
       ? `this FSN normally sells ${evidence.unitsPerDay.toFixed(2)} units/day`
       : 'this FSN has not sold at all across the whole report';
 
+  /* ---- the benchmark check, asked first --------------------------------- */
+
+  // "Benchmark Price − Fees > Minimum Bank Settlement". `minAcceptablePrice` is
+  // that same threshold expressed as a price — minimum bank settlement + fees —
+  // so the question reduces to whether the benchmark clears it, which is exactly
+  // what BENCHMARK_USABLE already records. The settlement values are required
+  // alongside it: without them there is no floor, and `classifyBenchmark` cannot
+  // have tested the condition at all.
+  //
+  // When it holds, Flipkart's own benchmark *is* the recommended price. It is
+  // asked before the zero-order bands because it is a published market read
+  // rather than an inference from a quiet day, so it does not need the evidence
+  // to authorise it and is not capped by it.
+  //
+  // When it fails, nothing happens here and the existing algorithm below —
+  // rules 12, 13 and 14 — decides the price exactly as it did before.
+  if (
+    benchmarkStatus === 'BENCHMARK_USABLE' &&
+    benchmarkPrice !== null &&
+    minAcceptablePrice !== null &&
+    currentSettlement !== null &&
+    minSettlement !== null &&
+    benchmarkPrice !== myPrice
+  ) {
+    const projected = currentSettlement + (benchmarkPrice - myPrice);
+    const cheaper = benchmarkPrice < myPrice;
+
+    return {
+      ...base,
+      demand: evidence,
+      // The benchmark condition either holds or does not, so this is reported at
+      // full confidence like the other deterministic rules — the zero-order
+      // evidence is still carried above, but it is not what decided the price.
+      confidence: 1,
+      recommendedPrice: benchmarkPrice,
+      priceDelta: benchmarkPrice - myPrice,
+      projectedSettlement: projected,
+      category: 'priceChange',
+      rule: 'RULE_13',
+      appliedRules: [...applied, 'RULE_1', 'RULE_13', 'RULE_2'],
+      reasonCode: cheaper ? 'BUYBOX_STALE_REDUCE' : 'BENCHMARK_USABLE',
+      reason: `Winning the Buy Box but nothing sold in 24 hours, and ${normally}. Flipkart's benchmark of ${money(
+        benchmarkPrice,
+      )} still settles at ${money(projected)} against a ${money(
+        minSettlement,
+      )} minimum, so it is the recommended price — ${
+        cheaper ? 'a cut' : 'a rise'
+      } of ${money(Math.abs(benchmarkPrice - myPrice))} from ${money(myPrice)}.`,
+    };
+  }
+
   if (evidence.signal === 'insufficient') {
     return hold(
       'RULE_12',
@@ -874,18 +1116,49 @@ function decideWithBuybox(input: BuyboxInput): Recommendation {
     );
   }
 
+  /* ---- tab 4: the Buy Box is ours, but the settlement values are missing -- */
+
   // Rule 2 keeps its veto ahead of any cut: with no floor to prove a price
-  // against, no price can be proved safe, so none is offered.
+  // against, no *lower* price can be proved safe, so the zero-order cut of rules
+  // 13/14 is off the table here.
+  //
+  // What the row is not left with is a blank. The first three tabs' conditions
+  // still run — rule 3 (already matching the winner), rule 5 (the winner is
+  // dearer) and rules 4/6/7 (match, proven price, or undercut) — and the price
+  // they produce is shown along with the winner price, so the row can be judged
+  // by hand. The minimum-settlement fallback price, minimum bank settlement +
+  // fees, is deliberately not offered on this path: the fees are derived from
+  // the very bank-settlement values that are missing, so there is nothing to
+  // derive it from.
   if (minAcceptablePrice === null || currentSettlement === null || minSettlement === null) {
+    const normal = normalTarget(myPrice, winnerPrice, history, learned);
+
+    if (normal === null) {
+      return {
+        ...base,
+        demand: evidence,
+        confidence: evidence.confidence,
+        category: 'settlementUnsafe',
+        rule: 'RULE_2',
+        appliedRules: [...applied, 'RULE_1', 'RULE_12', 'RULE_2'],
+        reasonCode: 'BUYBOX_STALE_HOLD',
+        reason: `Winning the Buy Box with no orders in 24 hours (${normally}), and the winner price ${money(
+          winnerPrice,
+        )} is not below mine, so the normal calculation wants no change. The bank-settlement values are missing, so no lower price can be proved safe either.`,
+      };
+    }
+
     return {
       ...base,
       demand: evidence,
       confidence: evidence.confidence,
+      recommendedPrice: normal.target,
+      priceDelta: normal.target - myPrice,
       category: 'settlementUnsafe',
-      rule: 'RULE_2',
-      appliedRules: [...applied, 'RULE_1', 'RULE_12', 'RULE_2'],
+      rule: normal.rule,
+      appliedRules: [...applied, 'RULE_1', 'RULE_12', ...normal.appliedRules, 'RULE_2'],
       reasonCode: 'BUYBOX_STALE_HOLD',
-      reason: `Winning the Buy Box with no orders in 24 hours (${normally}), but the bank-settlement values are missing, so no lower price can be proved safe.`,
+      reason: `Winning the Buy Box with no orders in 24 hours (${normally}). ${normal.reason} The bank-settlement values are missing, so the minimum-settlement check could not be run on that price — check it before applying.`,
     };
   }
 

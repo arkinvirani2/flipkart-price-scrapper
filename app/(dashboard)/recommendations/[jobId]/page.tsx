@@ -19,6 +19,7 @@ import { useParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import {
   ALREADY_CORRECT_COLUMNS,
+  BUYBOX_NO_ORDERS_COLUMNS,
   BUYBOX_WON_COLUMNS,
   NEEDS_REVIEW_COLUMNS,
   PRICE_CHANGE_COLUMNS,
@@ -79,6 +80,30 @@ export default function RecommendationsPage() {
     };
     for (const item of file?.recommendations ?? []) empty[item.category].push(item);
     return empty;
+  }, [file]);
+
+  /**
+   * The Buy Box lists, split by whether the product actually sold.
+   *
+   * Two different scenarios wearing one label: holding the Buy Box on something
+   * that is selling is a result, holding it on something nobody bought is a
+   * question. Purely a presentation split — the same rows, the same rules,
+   * sorted by the 24h order count the rules already recorded.
+   *
+   * Selected on `hasBuybox` rather than out of the buyboxWon bucket, because a
+   * Buy Box row that came back with a recommended price is filed under Price
+   * change — that is what makes it actionable and exportable — and it would
+   * otherwise be missing from the very list that explains why it has one. So a
+   * priced row appears in both, answering a different question in each. Rows from
+   * a batch with no orders report have no count at all, and sit with the ones
+   * that sold nothing because that is the list you go looking for them in.
+   */
+  const buybox = useMemo(() => {
+    const won = (file?.recommendations ?? []).filter((item) => item.hasBuybox === true);
+    return {
+      selling: won.filter((item) => (item.ordersLast24h ?? 0) > 0),
+      noOrders: won.filter((item) => (item.ordersLast24h ?? 0) <= 0),
+    };
   }, [file]);
 
   if (query.isLoading) {
@@ -230,10 +255,15 @@ export default function RecommendationsPage() {
             Settlement unsafe
             <CountBadge value={counts.settlementUnsafe} />
           </TabsTrigger>
-          <TabsTrigger value="buyboxWon">
+          <TabsTrigger value="buyboxSelling">
             <Trophy className="mr-1.5 size-4" />
-            Buy Box won
-            <CountBadge value={counts.buyboxWon} />
+            Buy Box won — selling
+            <CountBadge value={buybox.selling.length} />
+          </TabsTrigger>
+          <TabsTrigger value="buyboxNoOrders">
+            <Trophy className="mr-1.5 size-4" />
+            Buy Box won — no orders
+            <CountBadge value={buybox.noOrders.length} />
           </TabsTrigger>
           {counts.needsReview > 0 && (
             <TabsTrigger value="needsReview">
@@ -246,8 +276,9 @@ export default function RecommendationsPage() {
 
         <TabsContent value="priceChange" className="mt-0 space-y-2">
           <p className="text-xs text-muted-foreground">
-            The actionable list: a new price that wins the Buy Box and still settles above the minimum.
-            This is the only tab that exports.
+            The actionable list: a lower price that wins the Buy Box and still settles above the
+            minimum, or a higher one where the winner is dearer than us and the margin is going
+            unclaimed. This is the only tab that exports.
           </p>
           <RecommendationTable
             rows={buckets.priceChange}
@@ -274,7 +305,8 @@ export default function RecommendationsPage() {
 
         <TabsContent value="alreadyCorrect" className="mt-0 space-y-2">
           <p className="text-xs text-muted-foreground">
-            Already at the winner price, or the winner is dearer than us — nothing to change.
+            Already at the winner price, with the Buy Box going elsewhere — the Change is zero and
+            there is nothing to edit.
           </p>
           <RecommendationTable
             rows={buckets.alreadyCorrect}
@@ -286,7 +318,9 @@ export default function RecommendationsPage() {
 
         <TabsContent value="settlementUnsafe" className="mt-0 space-y-2">
           <p className="text-xs text-muted-foreground">
-            Matching the winner would push the settlement below the minimum, so no price is recommended.
+            Matching the winner would push the settlement below the minimum, so no price is recommended
+            — plus the rows where we hold the Buy Box but the bank-settlement values are missing, which
+            show what the normal calculation would have recommended for checking by hand.
           </p>
           <RecommendationTable
             rows={buckets.settlementUnsafe}
@@ -296,14 +330,30 @@ export default function RecommendationsPage() {
           />
         </TabsContent>
 
-        <TabsContent value="buyboxWon" className="mt-0 space-y-2">
+        <TabsContent value="buyboxSelling" className="mt-0 space-y-2">
           <p className="text-xs text-muted-foreground">
-            We hold the Buy Box on these — leave the price alone.
+            We hold the Buy Box and the product sold in the last 24 hours — the price is working, so
+            leave it alone.
           </p>
           <RecommendationTable
-            rows={buckets.buyboxWon}
+            rows={buybox.selling}
             columns={BUYBOX_WON_COLUMNS}
-            emptyMessage="This upload won no Buy Boxes."
+            emptyMessage="No Buy Box win sold anything in the last 24 hours."
+            onView={setDetail}
+          />
+        </TabsContent>
+
+        <TabsContent value="buyboxNoOrders" className="mt-0 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            We hold the Buy Box but nothing sold in the last 24 hours. The benchmark is checked
+            first: where it still clears the minimum bank settlement once fees come off, it is the
+            recommended price; where it does not, the zero-order rules decide. Every figure here is
+            measured from the recommended price, because on these rows the winner is us.
+          </p>
+          <RecommendationTable
+            rows={buybox.noOrders}
+            columns={BUYBOX_NO_ORDERS_COLUMNS}
+            emptyMessage="Every Buy Box win sold at least one unit."
             onView={setDetail}
           />
         </TabsContent>
