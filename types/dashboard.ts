@@ -50,11 +50,22 @@ export interface JobOptions {
   useNetworkCapture: boolean;
   /** Local-only convenience: watch the browser work. Useless on a headless host. */
   headed: boolean;
+
+  /**
+   * Ask Flipkart's seller endpoint directly instead of driving a browser.
+   * ~60x faster; anything it cannot answer still falls back to the browser.
+   */
+  useFastApi: boolean;
+  /** Products in flight at once on the fast path. */
+  concurrency: number;
+  /** Floor on the gap between requests to Flipkart. The real rate-limit guard. */
+  requestGapMs: number;
 }
 
 export const DEFAULT_JOB_OPTIONS: JobOptions = {
   // 1500ms is the pacing the scraper's own docs recommend for large batches;
-  // defaulting to it means the dashboard is polite out of the box.
+  // defaulting to it means the dashboard is polite out of the box. It applies
+  // to the browser path only — the fast path paces itself with requestGapMs.
   delayMs: 1500,
   delayJitterMs: 400,
   timeout: 20_000,
@@ -62,6 +73,12 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   blockRetries: 3,
   useNetworkCapture: true,
   headed: false,
+
+  useFastApi: true,
+  // 6 workers at a 120ms floor is ~8 requests/second — measured clean across a
+  // full 202-product batch, with headroom below the rate the limit appears at.
+  concurrency: 6,
+  requestGapMs: 120,
 };
 
 /**

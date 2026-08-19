@@ -86,6 +86,15 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // exits on "seller found" or "button gone" long before hitting it.
   maxShowMoreClicks: 40,
   useNetworkCapture: true,
+  // The fast path is the default: it produced identical seller prices to the
+  // browser on all 202 products of a real batch, and anything it cannot answer
+  // falls back to the browser anyway.
+  useFastApi: true,
+  // 6 workers at a 120ms floor is ~8 requests/second. Measured clean over a
+  // full batch; 8/100ms was also clean, so this leaves headroom rather than
+  // sitting on the limit.
+  concurrency: 6,
+  requestGapMs: 120,
   preferDirectSellerNavigation: true,
   verbose: true,
   // Zero keeps single-product and small-batch runs exactly as fast as before.
@@ -97,8 +106,22 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   humanLikeBehavior: true,
 };
 
+/**
+ * Merge caller options over the defaults, ignoring keys explicitly set to
+ * `undefined`.
+ *
+ * A plain spread would not: `{...DEFAULT, concurrency: undefined}` yields
+ * `undefined`, not the default. Every optional CLI flag arrives exactly that
+ * way — `concurrency: args.concurrency` is `undefined` whenever `--concurrency`
+ * was not passed — so a plain spread silently erases the default for every flag
+ * the user did not type.
+ */
 export function resolveOptions(options: ScraperOptions = {}): ResolvedOptions {
-  return { ...DEFAULT_OPTIONS, ...options };
+  const provided = Object.fromEntries(
+    Object.entries(options).filter(([, value]) => value !== undefined),
+  ) as ScraperOptions;
+
+  return { ...DEFAULT_OPTIONS, ...provided };
 }
 
 /* ------------------------------------------------------------------ waiting */

@@ -276,39 +276,96 @@ export default function UploadPage() {
               />
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="delay">Delay between products (ms)</Label>
-                <Input
-                  id="delay"
-                  type="number"
-                  min={0}
-                  step={100}
-                  value={options.delayMs}
-                  onChange={(event) =>
-                    setOptions({ ...options, delayMs: Math.max(0, Number(event.target.value) || 0) })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">
-                  1500 or more is strongly advised past a few hundred products — this is what keeps
-                  Flipkart from rate-limiting the run.
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div>
+                <Label htmlFor="fast" className="cursor-pointer">
+                  Fast mode
+                </Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Ask Flipkart&apos;s seller endpoint directly instead of opening two pages per
+                  product — around 60x quicker. Any product it cannot answer for still falls back to
+                  the browser, so this never costs you a result.
                 </p>
               </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="timeout">Per-action timeout (ms)</Label>
-                <Input
-                  id="timeout"
-                  type="number"
-                  min={1000}
-                  step={1000}
-                  value={options.timeout}
-                  onChange={(event) =>
-                    setOptions({ ...options, timeout: Math.max(1000, Number(event.target.value) || 20000) })
-                  }
-                />
-              </div>
+              <Switch
+                id="fast"
+                checked={options.useFastApi}
+                onCheckedChange={(checked) => setOptions({ ...options, useFastApi: checked })}
+              />
             </div>
+
+            {options.useFastApi ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="concurrency">Products at once</Label>
+                  <Input
+                    id="concurrency"
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={options.concurrency}
+                    onChange={(event) =>
+                      setOptions({
+                        ...options,
+                        concurrency: Math.min(16, Math.max(1, Number(event.target.value) || 1)),
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="gap">Minimum gap between requests (ms)</Label>
+                  <Input
+                    id="gap"
+                    type="number"
+                    min={0}
+                    step={20}
+                    value={options.requestGapMs}
+                    onChange={(event) =>
+                      setOptions({ ...options, requestGapMs: Math.max(0, Number(event.target.value) || 0) })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This, not the number of products at once, is what keeps a run under the rate
+                    limit. It widens itself if Flipkart pushes back.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="delay">Delay between products (ms)</Label>
+                  <Input
+                    id="delay"
+                    type="number"
+                    min={0}
+                    step={100}
+                    value={options.delayMs}
+                    onChange={(event) =>
+                      setOptions({ ...options, delayMs: Math.max(0, Number(event.target.value) || 0) })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    1500 or more is strongly advised past a few hundred products — this is what keeps
+                    Flipkart from rate-limiting the run.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="timeout">Per-action timeout (ms)</Label>
+                  <Input
+                    id="timeout"
+                    type="number"
+                    min={1000}
+                    step={1000}
+                    value={options.timeout}
+                    onChange={(event) =>
+                      setOptions({ ...options, timeout: Math.max(1000, Number(event.target.value) || 20000) })
+                    }
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-between rounded-md border p-3">
               <div>
@@ -317,7 +374,7 @@ export default function UploadPage() {
                 </Label>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Useful for debugging a stubborn product. Only works because this runs on your own
-                  machine.
+                  machine{options.useFastApi ? ', and only for products that fall back to it' : ''}.
                 </p>
               </div>
               <Switch
@@ -330,9 +387,11 @@ export default function UploadPage() {
             <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
               Estimated run time for {report.rows.length} products:{' '}
               <span className="tabular font-medium text-foreground">
-                {estimateRuntime(report.rows.length, options.delayMs)}
+                {estimateRuntime(report.rows.length, options)}
               </span>{' '}
-              — assuming roughly 5s per product plus the delay.
+              {options.useFastApi
+                ? '— measured at roughly 180ms per product on a real batch.'
+                : '— assuming roughly 5s per product plus the delay.'}
             </div>
 
             {create.isError && (
@@ -354,9 +413,15 @@ export default function UploadPage() {
 }
 
 /** Rough, and labelled as rough — a precise number here would be a fiction. */
-function estimateRuntime(count: number, delayMs: number): string {
-  const totalMs = count * (5_000 + delayMs);
-  const minutes = totalMs / 60_000;
+function estimateRuntime(count: number, options: JobOptions): string {
+  // Fast path: one request per product, so throughput is whichever binds first —
+  // the request gap, or the round-trip divided across the workers in flight.
+  // ~700ms is the measured median round trip.
+  const perProductMs = options.useFastApi
+    ? Math.max(options.requestGapMs, 700 / Math.max(1, options.concurrency))
+    : 5_000 + options.delayMs;
+
+  const minutes = (count * perProductMs) / 60_000;
 
   if (minutes < 1) return 'under a minute';
   if (minutes < 60) return `about ${Math.round(minutes)} minutes`;

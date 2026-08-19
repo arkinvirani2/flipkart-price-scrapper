@@ -41,7 +41,7 @@ import {
 import { generateRecommendations } from '@/lib/services/recommendations';
 import { appendLog } from '@/lib/store/logStore';
 import { jobPaths } from '@/lib/store/paths';
-import type { JobState, LiveProgress, LogLevel } from '@/types/dashboard';
+import { DEFAULT_JOB_OPTIONS, type JobState, type LiveProgress, type LogLevel } from '@/types/dashboard';
 import { publish } from './eventBus';
 
 interface ActiveRun {
@@ -50,6 +50,14 @@ interface ActiveRun {
   /** What the user asked for. Drives the final state and when the abort fires. */
   intent: 'run' | 'pause' | 'stop';
   progress: LiveProgress | null;
+  /**
+   * Row indices currently being scraped.
+   *
+   * The fast path runs several products at once, so "what is happening now" is
+   * no longer a single row. This set is what stops a finished product from
+   * blanking the live panel while its neighbours are still in flight.
+   */
+  inFlight: Set<number>;
   /** Resolves when the background scrape settles. Used by tests and shutdown. */
   finished: Promise<void>;
 }
@@ -110,6 +118,7 @@ export class JobRunner {
       controller,
       intent: 'run',
       progress: null,
+      inFlight: new Set<number>(),
       finished: Promise.resolve(),
     };
     state.active = run;
@@ -193,6 +202,11 @@ export class JobRunner {
           blockBackoffMs: options.blockBackoffMs,
           blockRetries: options.blockRetries,
           useNetworkCapture: options.useNetworkCapture,
+          // Older manifests predate the fast path and carry none of these, so
+          // each falls back to the scraper's own default rather than undefined.
+          useFastApi: options.useFastApi ?? DEFAULT_JOB_OPTIONS.useFastApi,
+          concurrency: options.concurrency ?? DEFAULT_JOB_OPTIONS.concurrency,
+          requestGapMs: options.requestGapMs ?? DEFAULT_JOB_OPTIONS.requestGapMs,
           headless: !options.headed,
           verbose: true,
           screenshotOnFailureDir: jobPaths.screenshots(jobId),
@@ -218,7 +232,8 @@ export class JobRunner {
   ): void {
     const index = keyToIndex.get(resultKey(input)) ?? -1;
 
-    if (run.progress?.rowIndex !== index && index >= 0) {
+    if (index >= 0 && !run.inFlight.has(index)) {
+      run.inFlight.add(index);
       setRowStatus(run.jobId, index, 'running');
     }
 
@@ -266,8 +281,15 @@ export class JobRunner {
       );
     }
 
-    run.progress = null;
-    publish(run.jobId, { type: 'progress', progress: null });
+    if (row) run.inFlight.delete(row.index);
+
+    // Only clear the panel once nothing is left running. On the fast path a
+    // product finishing is the normal case while five others are still going,
+    // and blanking on each one would make the panel flicker empty throughout.
+    if (run.inFlight.size === 0) {
+      run.progress = null;
+      publish(run.jobId, { type: 'progress', progress: null });
+    }
 
     if (run.intent === 'pause') run.controller.abort();
   }
@@ -313,6 +335,7 @@ export class JobRunner {
     }
 
     run.progress = null;
+    run.inFlight.clear();
     state.active = null;
 
     publish(jobId, { type: 'progress', progress: null });

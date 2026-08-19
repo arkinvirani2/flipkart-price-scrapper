@@ -62,8 +62,8 @@ export interface ScrapeResult {
   message?: string;
   sellersScanned?: number;
   showMoreClicks?: number;
-  /** Where the seller list came from. */
-  source?: 'network' | 'dom';
+  /** Where the seller list came from. `api` is the fast path; the rest are browser. */
+  source?: 'api' | 'network' | 'dom';
   durationMs?: number;
   /** How many times this product was attempted, including back-off retries. 1 when it worked first go. */
   attempts?: number;
@@ -105,6 +105,30 @@ export interface ScraperOptions {
   maxShowMoreClicks?: number;
   /** Try to reuse a captured seller API/network payload before DOM scraping. */
   useNetworkCapture?: boolean;
+
+  /**
+   * Call Flipkart's own seller endpoint directly instead of driving a browser.
+   *
+   * Roughly 60x faster — no page loads, and every seller arrives in one
+   * response. A product the API cannot answer for still falls back to the full
+   * browser path, so this changes how a result is obtained, never whether one
+   * is. Set false to force the browser path for every product.
+   */
+  useFastApi?: boolean;
+  /**
+   * Products in flight at once on the fast path. The browser path is always
+   * sequential and ignores this.
+   */
+  concurrency?: number;
+  /**
+   * Minimum milliseconds between requests to Flipkart, across all workers.
+   *
+   * This — not `concurrency` — is what keeps a run under the rate limit.
+   * Measured on a 202-product batch: 8 workers unpaced drew 87 rejections; 8
+   * workers spaced 100ms apart drew none. The limiter widens this by itself if
+   * Flipkart does push back, then walks it back down as calls succeed.
+   */
+  requestGapMs?: number;
   /** Skip clicking and navigate straight to /sellers?pid=... when we can. */
   preferDirectSellerNavigation?: boolean;
   /** Emit progress logs. */

@@ -49,10 +49,13 @@ interface CliArgs {
   journal?: string;
   resume: boolean;
   noHuman: boolean;
+  noFast: boolean;
+  concurrency?: number;
+  gap?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false };
+  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false, noFast: false };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -78,6 +81,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--journal': args.journal = next(); break;
       case '--resume': args.resume = true; break;
       case '--no-human': args.noHuman = true; break;
+      case '--no-fast': args.noFast = true; break;
+      case '--concurrency': args.concurrency = Number(next()); break;
+      case '--gap': args.gap = Number(next()); break;
       case '--help':
       case '-h':
         printUsage();
@@ -107,6 +113,12 @@ Flipkart seller price comparison
   Large batch (recommended for hundreds of products):
     npm run scrape -- --file inputs.json --out results.json --delay 1500 --resume
 
+  Speed (fast path is on by default):
+    --concurrency <n>     Products in flight at once. Default 6.
+    --gap <ms>            Minimum gap between requests to Flipkart. Default 120.
+                          This, not --concurrency, is the rate-limit guard.
+    --no-fast             Force the browser path for every product.
+
   Options:
     --headed              Run with a visible browser (useful for debugging).
     --quiet               Suppress progress logs; print only the JSON result.
@@ -115,7 +127,7 @@ Flipkart seller price comparison
     --no-network          Skip network payload capture; DOM scraping only.
     --screenshot-dir <d>  Write a screenshot here when a product fails.
 
-  Batch pacing and recovery:
+  Batch pacing and recovery (browser path):
     --delay <ms>          Pause between products. Default 0. Use ~1500 for 1000+ items.
     --jitter <ms>         Random extra pause, 0..n, on top of --delay. Default 400.
     --block-backoff <ms>  First pause after a captcha/rate-limit. Default 60000, doubling.
@@ -139,6 +151,9 @@ function toOptions(args: CliArgs): ScraperOptions {
     blockBackoffMs: args.blockBackoff,
     blockRetries: args.blockRetries,
     humanLikeBehavior: !args.noHuman,
+    useFastApi: !args.noFast,
+    concurrency: args.concurrency,
+    requestGapMs: args.gap,
   };
 }
 

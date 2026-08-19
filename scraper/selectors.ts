@@ -179,3 +179,43 @@ export function sellersUrlForPid(pid: string): string {
 export function anyOf(list: readonly string[]): string {
   return list.join(', ');
 }
+
+/* ------------------------------------------------------------------- api */
+
+/**
+ * Flipkart's own seller-list endpoint — the one the /sellers page calls to fill
+ * itself in.
+ *
+ * The page at /sellers?pid=<FSN> ships an empty shell (`sellersPage:
+ * {asyncStatus: "INIT"}`) and populates it from this POST. Calling it directly
+ * returns every seller for a product in one response, with names and prices as
+ * numbers, so it replaces the whole PDP-then-seller-page browser round trip.
+ *
+ * Verified 2026-08-19: 202/202 products of a real batch returned identical
+ * seller prices to the DOM path, in 24s rather than 25 minutes.
+ *
+ * `2.rome` is one of several numbered hosts (1..4) Flipkart's own front-end
+ * round-robins over; they are interchangeable.
+ */
+export const SELLER_API_URL = 'https://2.rome.api.flipkart.com/api/3/page/dynamic/product-sellers';
+
+/** Request body for SELLER_API_URL. `locationContext` may be empty — prices are national. */
+export function sellerApiBody(pid: string): string {
+  return JSON.stringify({ requestContext: { productId: pid }, locationContext: {} });
+}
+
+/**
+ * Flipkart rejects the call without its own website UA marker. The suffix is
+ * what its web client sends; a plain browser UA alone gets a 403.
+ */
+export const SELLER_API_UA_SUFFIX = ' FKUA/website/42/website/Desktop';
+
+/**
+ * Widget keys inside RESPONSE.data. Flipkart suffixes each with an instance
+ * number, so these are matched as prefixes rather than compared for equality.
+ */
+export const API_WIDGET_SELLERS = 'product_seller_detail';
+export const API_WIDGET_SUMMARY = 'product_summary';
+/** Present (and non-null) only when the product cannot currently be bought. */
+export const API_WIDGET_NOTIFY = 'product_notify';
+export const API_WIDGET_ADD_TO_CART = 'product_addtocart';

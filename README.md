@@ -272,10 +272,45 @@ with `--resume` once you're unblocked.
 Without `--resume`, an existing journal is deleted rather than merged, so two runs never
 silently blend into one output file.
 
+## Speed: the fast path
+
+By default the scraper never opens a browser. It asks Flipkart's own seller endpoint —
+the one the `/sellers?pid=…` page calls to fill itself in — and gets every seller for a
+product, with prices, in a single request.
+
+Measured on a real 202-product batch:
+
+| | browser path | fast path |
+|---|---|---|
+| wall clock | 25 min | **36 s** |
+| per product | ~7.4 s | ~180 ms |
+| seller prices | baseline | identical on all 202 |
+
+Where the old 7.4s went: 1.9s loading the product page, 1.5s loading and scraping the
+seller page, and ~4s of deliberate idle — the pacing delay, the human-like mouse activity,
+and browser-context churn. The fast path has none of that to spend.
+
+Two things make it safe:
+
+- **Anything the API cannot answer falls back to the browser**, per product. The fast path
+  can save time; it cannot cost you a result. `--no-fast` forces the browser for everything.
+- **`--gap`, not `--concurrency`, is the rate-limit guard.** Flipkart tolerates parallel
+  callers but not bursts: 8 workers unpaced drew 87 rejections in 202 requests, while the
+  same 8 workers spaced 100ms apart drew none. The limiter widens the gap by itself if
+  Flipkart does push back, then walks it back down.
+
+One behavioural difference worth knowing: the browser read the headline price from the
+product page's JSON-LD, which is a cached server-render, while the seller prices came from
+the live seller page. The fast path takes both numbers from the same live response. On ~4.5%
+of products (9 of 202, measured simultaneously) those two sources disagree, because
+Flipkart's cached page lags its live pricing — so a few rows will show a different
+`mainPrice` than an older run did, and the comparison behind it is now like-for-like.
+
 ## Operational notes
 
-- Batch runs are **sequential in one browser** on purpose; parallel tabs against Flipkart
-  invite rate-limiting and captchas.
+- The **browser path** is sequential in one browser on purpose; parallel tabs against
+  Flipkart invite rate-limiting and captchas. The fast path runs several products at once
+  because a bare HTTP request is not a browser tab.
 - `--screenshot-dir <dir>` writes a screenshot for each failed product.
 - Pass `storageStatePath` if you need a logged-in session.
 - Flipkart's markup differs across A/B buckets and viewports — both known seller layouts
@@ -304,7 +339,9 @@ callers can branch on it.
 ## Project layout
 
 ```
-scraper/          the Playwright scraper — unchanged core, called by both CLI and dashboard
+scraper/          the scraper — called by both CLI and dashboard
+  flipkartApi.ts  the fast path: Flipkart's seller endpoint over HTTP, paced and parsed
+  scraper.ts      orchestration; picks the fast path, falls back to the browser per product
   journal.ts      NDJSON journal + resume rule, shared by the CLI and the dashboard
 app/              Next.js App Router — dashboard pages and API routes
 components/        UI: dashboard, queue, charts, logs, upload, shadcn primitives
