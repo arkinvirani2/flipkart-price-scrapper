@@ -50,12 +50,13 @@ interface CliArgs {
   resume: boolean;
   noHuman: boolean;
   noFast: boolean;
+  noRetry: boolean;
   concurrency?: number;
   gap?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false, noFast: false };
+  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false, noFast: false, noRetry: false };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -82,6 +83,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--resume': args.resume = true; break;
       case '--no-human': args.noHuman = true; break;
       case '--no-fast': args.noFast = true; break;
+      case '--no-retry-failed': args.noRetry = true; break;
       case '--concurrency': args.concurrency = Number(next()); break;
       case '--gap': args.gap = Number(next()); break;
       case '--help':
@@ -118,6 +120,7 @@ Flipkart seller price comparison
     --gap <ms>            Minimum gap between requests to Flipkart. Default 120.
                           This, not --concurrency, is the rate-limit guard.
     --no-fast             Force the browser path for every product.
+    --no-retry-failed     Do not give failed products a second attempt at the end.
 
   Options:
     --headed              Run with a visible browser (useful for debugging).
@@ -154,6 +157,7 @@ function toOptions(args: CliArgs): ScraperOptions {
     useFastApi: !args.noFast,
     concurrency: args.concurrency,
     requestGapMs: args.gap,
+    retryFailedProducts: !args.noRetry,
   };
 }
 

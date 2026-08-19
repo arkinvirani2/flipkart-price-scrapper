@@ -207,6 +207,7 @@ export class JobRunner {
           useFastApi: options.useFastApi ?? DEFAULT_JOB_OPTIONS.useFastApi,
           concurrency: options.concurrency ?? DEFAULT_JOB_OPTIONS.concurrency,
           requestGapMs: options.requestGapMs ?? DEFAULT_JOB_OPTIONS.requestGapMs,
+          retryFailedProducts: options.retryFailedProducts ?? DEFAULT_JOB_OPTIONS.retryFailedProducts,
           headless: !options.headed,
           verbose: true,
           screenshotOnFailureDir: jobPaths.screenshots(jobId),

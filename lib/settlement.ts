@@ -113,6 +113,90 @@ function categorize(
   return { category: passes ? 'main' : 'below', reason: null };
 }
 
+/* ------------------------------------------- candidate price -> settlement */
+
+/**
+ * The settlement a candidate listing price would produce.
+ *
+ * This is the one direction the maths is allowed to run, and it is stated here
+ * as a function so nothing has to re-derive it:
+ *
+ *     settlement(P) = currentBankSettlement + (P − myPrice)
+ *
+ * A rupee on the price is a rupee on the settlement — Flipkart's fees do not
+ * move when the price does. Feeding `currentPrice` in reproduces
+ * `finalBankSettlement` exactly, which is what keeps this screen and the
+ * recommendation screen from ever disagreeing.
+ *
+ * Null when the settlement values are missing: an unknown settlement must never
+ * be mistaken for an affordable one.
+ */
+export function settlementAtPrice(settlement: Settlement, candidatePrice: number | null): number | null {
+  const { sellerPrice, currentBankSettlement } = settlement;
+  if (candidatePrice === null || sellerPrice === null || currentBankSettlement === null) return null;
+  return currentBankSettlement + (candidatePrice - sellerPrice);
+}
+
+/** A candidate listing price, judged against the minimum allowed settlement. */
+export interface CandidateVerdict {
+  /** The listing price being judged. */
+  price: number;
+  /** What it would settle at. Null when the settlement values are missing. */
+  settlement: number | null;
+  /** The minimum this SKU is allowed to settle at. */
+  minimumSettlement: number | null;
+  /**
+   * True only when the settlement is known *and* clears the minimum.
+   *
+   * Unprovable is not safe. A missing threshold means we cannot say the price is
+   * affordable, and recommending it anyway is exactly the mistake this type
+   * exists to make impossible.
+   */
+  safe: boolean;
+  /** Why it failed, for the audit trail. Null when safe. */
+  unsafeReason: string | null;
+}
+
+/**
+ * Judge a candidate listing price the way the pricing brief requires:
+ * calculate its settlement, then compare that settlement with the minimum.
+ *
+ * Deliberately *not* a comparison of the candidate against a price threshold.
+ * The two are algebraically the same thing here — settlement is linear in price
+ * with slope 1, so `settlement(P) >= minimum` and `P >= floor` agree exactly —
+ * but only one of them reads the way the business rule is written, and only one
+ * of them survives a future where fees stop being price-independent.
+ */
+export function judgeCandidatePrice(settlement: Settlement, candidatePrice: number | null): CandidateVerdict | null {
+  if (candidatePrice === null) return null;
+
+  const projected = settlementAtPrice(settlement, candidatePrice);
+  const minimum = settlement.bankSettlementThreshold;
+
+  if (candidatePrice <= 0) {
+    return { price: candidatePrice, settlement: projected, minimumSettlement: minimum, safe: false, unsafeReason: 'The candidate price is not a real price.' };
+  }
+  if (projected === null || minimum === null) {
+    return {
+      price: candidatePrice,
+      settlement: projected,
+      minimumSettlement: minimum,
+      safe: false,
+      unsafeReason: 'The bank-settlement values are missing, so this price cannot be proved safe.',
+    };
+  }
+  if (projected < minimum) {
+    return {
+      price: candidatePrice,
+      settlement: projected,
+      minimumSettlement: minimum,
+      safe: false,
+      unsafeReason: `It would settle at ₹${projected.toLocaleString('en-IN')}, below the ₹${minimum.toLocaleString('en-IN')} minimum.`,
+    };
+  }
+  return { price: candidatePrice, settlement: projected, minimumSettlement: minimum, safe: true, unsafeReason: null };
+}
+
 export const SETTLEMENT_CATEGORY_LABEL: Record<SettlementCategory, string> = {
   main: 'Main',
   below: 'Below threshold',

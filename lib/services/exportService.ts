@@ -276,7 +276,12 @@ const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
     width: 10,
     value: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'YES' : 'NO'),
   },
+  // Units across the whole latest orders report, not just the 24h window the
+  // rules test. Null means no report was uploaded; 0 means it was read and this
+  // FSN sold nothing.
+  { header: 'Order Count', width: 13, value: (item) => item.orderCount ?? null },
   { header: 'Orders Last 24H', width: 16, value: (item) => item.ordersLast24h },
+  { header: 'Other Sellers', width: 14, value: (item) => item.otherSellerCount ?? null },
   { header: 'Normal Units Per Day', width: 20, value: (item) => round2(item.historicalUnitsPerDay) },
   { header: 'Demand Signal', width: 14, value: (item) => item.demand?.signal ?? null },
   { header: 'Confidence %', width: 13, value: (item) => Math.round(item.confidence * 100) },

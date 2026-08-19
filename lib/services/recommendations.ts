@@ -27,12 +27,12 @@ import {
   type RecommendationHistoryEntry,
   type RecommendationHistorySummary,
 } from '@/lib/recommendation';
-import { demandFor } from '@/lib/demand';
+import { demandFor, type OrdersReport } from '@/lib/demand';
 import type { UploadDecision } from '@/lib/intelligence/engine';
 import { syncAccount } from '@/lib/intelligence/store';
 import { getJob, getOrdersReport, getRows, listJobs, sameAccount, updateManifest } from '@/lib/store/jobStore';
 import { jobPaths } from '@/lib/store/paths';
-import type { JobRow, OrdersWindow, RecommendationCounts } from '@/types/dashboard';
+import type { JobManifest, JobRow, OrdersWindow, RecommendationCounts } from '@/types/dashboard';
 
 /** The shape of recommendations.json. */
 export interface RecommendationFile {
@@ -55,16 +55,42 @@ export interface RecommendationFile {
 /**
  * Every previous appearance of every FSN, for one account, newest upload first.
  *
- * This is the account isolation boundary: a job whose `accountName` does not
- * match is never opened, so an Anuttar upload cannot see a Previx price.
+ * Two boundaries are enforced here, and both matter:
+ *
+ *   account — a job whose `accountName` does not match is never opened, so an
+ *     Anuttar upload cannot see a Previx price.
+ *
+ *   time — only uploads *older* than the one being scored count. Excluding the
+ *     job itself is not enough: a batch is scored again whenever someone presses
+ *     Regenerate, and by then newer uploads exist. Without this cut they were
+ *     read as that batch's "history", so rule 6 ("won at this price before") and
+ *     rule 7 ("five uploads without the Buy Box") could be shown the future.
+ *     At end of run there is nothing newer, which is why this could only ever
+ *     go wrong on a regenerate — and why it had gone unnoticed.
  */
-function historyByFsn(accountName: string, excludeJobId: string): Map<string, RecommendationHistoryEntry[]> {
+export function isPriorUpload(
+  manifest: Pick<JobManifest, 'id' | 'accountName' | 'uploadTime' | 'createdAt'>,
+  accountName: string,
+  excludeJobId: string,
+  scoredUploadTime: string,
+): boolean {
+  if (manifest.id === excludeJobId) return false;
+  if (!sameAccount(manifest.accountName, accountName)) return false;
+  return (manifest.uploadTime ?? manifest.createdAt) < scoredUploadTime;
+}
+
+function historyByFsn(
+  accountName: string,
+  excludeJobId: string,
+  /** Upload time of the batch being scored. Anything at or after this is the future. */
+  scoredUploadTime: string,
+): Map<string, RecommendationHistoryEntry[]> {
   const index = new Map<string, RecommendationHistoryEntry[]>();
 
   // listJobs is already newest-first by createdAt; sorting explicitly on the
   // upload time keeps that true even for jobs whose manifest predates the field.
   const previous = listJobs()
-    .filter((manifest) => manifest.id !== excludeJobId && sameAccount(manifest.accountName, accountName))
+    .filter((manifest) => isPriorUpload(manifest, accountName, excludeJobId, scoredUploadTime))
     .sort((left, right) =>
       (right.uploadTime ?? right.createdAt).localeCompare(left.uploadTime ?? left.createdAt),
     );
@@ -95,6 +121,31 @@ function historyByFsn(accountName: string, excludeJobId: string): Map<string, Re
   }
 
   return index;
+}
+
+/**
+ * The newest orders report this account has uploaded, for a batch that has none
+ * of its own.
+ *
+ * Account-scoped for the same reason history is: one seller's order volumes say
+ * nothing about another's. Returns null when no batch of this account carries a
+ * report, which leaves `ordersAvailable` false — "nobody told us" — rather than
+ * inventing a zero.
+ */
+function latestOrdersReport(accountName: string, excludeJobId: string): OrdersReport | null {
+  if (!accountName) return null;
+
+  const candidates = listJobs()
+    .filter((manifest) => manifest.id !== excludeJobId && sameAccount(manifest.accountName, accountName))
+    .sort((left, right) =>
+      (right.uploadTime ?? right.createdAt).localeCompare(left.uploadTime ?? left.createdAt),
+    );
+
+  for (const manifest of candidates) {
+    const report = getOrdersReport(manifest.id);
+    if (report) return report;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------- the learner */
@@ -178,7 +229,10 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
   if (!record) return null;
 
   const accountName = record.manifest.accountName?.trim() || record.inputs[0]?.targetSeller || '';
-  const history = accountName ? historyByFsn(accountName, jobId) : new Map<string, RecommendationHistoryEntry[]>();
+  const uploadTime = record.manifest.uploadTime ?? record.manifest.createdAt;
+  const history = accountName
+    ? historyByFsn(accountName, jobId, uploadTime)
+    : new Map<string, RecommendationHistoryEntry[]>();
   const historyJobs = new Set<string>();
 
   // Bring this account's per-FSN intelligence up to date first: it replays any
@@ -189,7 +243,12 @@ export function generateRecommendations(jobId: string): RecommendationFile | nul
   // The orders report is per-batch and read once. `ordersAvailable` is what
   // separates "this FSN sold nothing" from "nobody told us what it sold", and
   // only the first of those may ever move a price.
-  const orders = getOrdersReport(jobId);
+  //
+  // A batch uploaded without its own report falls back to the newest one this
+  // account has, so "the latest orders report" means the latest one that exists
+  // rather than nothing at all. A batch that has its own always uses it: at the
+  // moment a run ends, its own report *is* the latest.
+  const orders = getOrdersReport(jobId) ?? latestOrdersReport(accountName, jobId);
 
   const recommendations = record.rows.map((row: JobRow) => {
     const entries = history.get(row.fsn);

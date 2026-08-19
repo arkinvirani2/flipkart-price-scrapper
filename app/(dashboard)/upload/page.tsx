@@ -369,6 +369,23 @@ export default function UploadPage() {
 
             <div className="flex items-center justify-between rounded-md border p-3">
               <div>
+                <Label htmlFor="retry" className="cursor-pointer">
+                  Retry failed products automatically
+                </Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  After the main pass, every failed product gets one more attempt. A retry can only
+                  turn a failure into a result — it never changes a row that already worked.
+                </p>
+              </div>
+              <Switch
+                id="retry"
+                checked={options.retryFailedProducts}
+                onCheckedChange={(checked) => setOptions({ ...options, retryFailedProducts: checked })}
+              />
+            </div>
+
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div>
                 <Label htmlFor="headed" className="cursor-pointer">
                   Show the browser window
                 </Label>

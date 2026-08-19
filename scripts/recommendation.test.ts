@@ -20,6 +20,7 @@ import {
   expectedBankSettlement,
   expectedListingPrice,
   expectedListingPriceAtRecommendation,
+  assessBenchmarkAsListingPrice,
   minimumAcceptablePrice,
   priceDifference,
   recommendForRow,
@@ -28,7 +29,9 @@ import {
   type DemandContext,
   type Recommendation,
 } from '@/lib/recommendation';
-import { computeSettlement } from '@/lib/settlement';
+import { computeSettlement, judgeCandidatePrice, settlementAtPrice } from '@/lib/settlement';
+import { isPriorUpload } from '@/lib/services/recommendations';
+import { buildSupportMessage } from '@/lib/supportTicket';
 import type { JobRow } from '@/types/dashboard';
 
 /* ------------------------------------------------------------- the fixture */
@@ -450,7 +453,7 @@ const CASES: Array<[string, () => void]> = [
   ],
 
   [
-    'Case 5b — a price that would settle below the minimum is never recommended',
+    'Case 5b — a price that would settle below the minimum is never recommended, and a safe one is offered instead',
     () => {
       const item = recommend({
         listingPrice: 200,
@@ -460,11 +463,18 @@ const CASES: Array<[string, () => void]> = [
         minimumBankSettlement: 150,
       });
 
+      // The finding is unchanged: chasing this winner is unaffordable.
       assert.equal(item.rule, 'RULE_9');
       assert.equal(item.category, 'settlementUnsafe');
-      assert.equal(item.recommendedPrice, null);
-      assert.equal(item.projectedSettlement, 80);
-      assert.ok((item.projectedSettlement as number) < (item.minSettlement as number));
+
+      // What changed: the row no longer stops at "unsafe". Matching the winner
+      // at 100 would settle at 80 against a 150 minimum, so the search falls to
+      // the floor — 200 + (150 − 180) = 170, settling at exactly 150.
+      assert.equal(item.recommendedPrice, 170);
+      assert.equal(item.projectedSettlement, 150);
+
+      // The invariant the whole tab exists to protect.
+      assert.ok((item.projectedSettlement as number) >= (item.minSettlement as number));
     },
   ],
 
@@ -497,7 +507,12 @@ const CASES: Array<[string, () => void]> = [
 
       // The row stays on this list, with the rule the engine gave it.
       assert.equal(item.rule, 'RULE_9');
-      assert.equal(item.recommendedPrice, null);
+
+      // And it now also carries the benchmark as its Expected Listing Price,
+      // because that price was proved safe: 190 settles at 170 >= 150.
+      assert.equal(item.recommendedPrice, 190);
+      assert.equal(item.projectedSettlement, 170);
+      assert.ok((item.projectedSettlement as number) >= (item.minSettlement as number));
     },
   ],
 
@@ -519,10 +534,19 @@ const CASES: Array<[string, () => void]> = [
 
       const derived = settlementUnsafeTarget(item);
       assert.equal(derived.benchmarkUsable, false);
-      // Expected listing price = minimum bank settlement + fees.
-      assert.equal(derived.expectedListingPrice, 170);
-      assert.equal(derived.expectedListingPrice, item.minAcceptablePrice);
-      // Expected bank settlement = minimum bank settlement, exactly.
+
+      // The engine falls to the floor: 200 + (150 − 180) = 170 as a *displayed*
+      // price, which settles at exactly the 150 minimum.
+      assert.equal(item.recommendedPrice, 170);
+      assert.equal(item.recommendedPrice, item.minAcceptablePrice);
+      assert.equal(item.projectedSettlement, 150);
+
+      // Expected listing price is quoted in listing-price terms, like the
+      // Current listing price it sits beside — listed 220 plus the same −30
+      // change. Previously this one branch returned the raw displayed-price
+      // floor (170) while the benchmark branch returned a listing price, so the
+      // column mixed two scales; both now use listing terms.
+      assert.equal(derived.expectedListingPrice, 190);
       assert.equal(derived.expectedBankSettlement, 150);
       assert.equal(derived.expectedBankSettlement, item.minSettlement);
       assert.equal(derived.change, -30);
@@ -728,6 +752,400 @@ const CASES: Array<[string, () => void]> = [
 
       assert.equal(currentListingPrice(item), 210);
       assert.equal(expectedListingPrice(item), 205);
+    },
+  ],
+
+  /* -- a failed scrape never reaches the pricing rules --------------------- */
+
+  /*
+   * The fast path fills in whatever it managed to read even on a row it had to
+   * fail — an out-of-stock product still names your seller and its price, so the
+   * queue can show them instead of a blank line. These two cases pin down that
+   * this is presentation only: a row whose status is not OK must come out as
+   * NO_DATA / needsReview with no recommended price, no matter how complete its
+   * prices look. If someone ever removes the status gate, these fail.
+   */
+  [
+    'A failed row carrying full prices is still NO_DATA, never a priced recommendation',
+    () => {
+      const row = jobRow({
+        flipkartDisplayedPrice: 329,
+        winnerPrice: 329,
+        winningSeller: SELLER,
+        currentBankSettlement: 300,
+        minimumBankSettlement: 150,
+      });
+      // Exactly what the scraper now writes for an out-of-stock product whose
+      // page still lists our seller.
+      row.result!.status = 'PRODUCT_UNAVAILABLE';
+      row.result!.message = 'out of stock';
+      row.status = 'failed';
+
+      const item = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, NO_ORDERS);
+
+      assert.equal(item.category, 'needsReview');
+      assert.equal(item.rule, 'NO_DATA');
+      assert.equal(item.reasonCode, 'NO_DATA');
+      assert.equal(item.recommendedPrice, null);
+      assert.equal(item.priceDelta, null);
+    },
+  ],
+
+  [
+    'A seller-not-found row carrying a page price is still NO_DATA',
+    () => {
+      const row = jobRow({
+        flipkartDisplayedPrice: null,
+        winnerPrice: 178,
+        winningSeller: 'RaaghavTraders',
+        currentBankSettlement: 150,
+        minimumBankSettlement: 100,
+      });
+      row.result!.status = 'SELLER_NOT_FOUND';
+      row.result!.sellerName = null;
+      row.status = 'failed';
+
+      const item = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, NO_ORDERS);
+
+      assert.equal(item.category, 'needsReview');
+      assert.equal(item.rule, 'NO_DATA');
+      assert.equal(item.recommendedPrice, null);
+    },
+  ],
+
+  /* -- history may only ever look backwards -------------------------------- */
+
+  /*
+   * Rules 6 and 7 reason explicitly about past uploads ("won at this price
+   * before", "five uploads without the Buy Box"). Pressing Regenerate on an old
+   * batch must therefore not let uploads made *after* it count as its history.
+   */
+  [
+    'History includes older uploads of the same account only — never the job itself, another account, or the future',
+    () => {
+      const scored = '2026-08-19T12:00:00.000Z';
+      const at = (id: string, uploadTime: string, accountName = SELLER) => ({
+        id,
+        accountName,
+        uploadTime,
+        createdAt: uploadTime,
+      });
+
+      // Older upload, same account: this is what history is for.
+      assert.equal(isPriorUpload(at('older', '2026-08-19T11:00:00.000Z'), SELLER, 'self', scored), true);
+
+      // Newer upload: the future, and the bug this guards.
+      assert.equal(isPriorUpload(at('newer', '2026-08-19T13:00:00.000Z'), SELLER, 'self', scored), false);
+
+      // The batch being scored is never its own history.
+      assert.equal(isPriorUpload(at('self', '2026-08-19T11:00:00.000Z'), SELLER, 'self', scored), false);
+
+      // A different Flipkart account stays invisible, however old it is.
+      assert.equal(
+        isPriorUpload(at('other', '2026-08-19T11:00:00.000Z', 'Some Other Account'), SELLER, 'self', scored),
+        false,
+      );
+
+      // An upload at the exact same instant is not "before" it.
+      assert.equal(isPriorUpload(at('tie', scored), SELLER, 'self', scored), false);
+    },
+  ],
+
+  /* ================================================================== *
+   * The pricing brief's own validation cases (section 18).             *
+   * ================================================================== */
+
+  /*
+   * The direction rule, asserted directly rather than through a scenario.
+   *
+   * Benchmark Price is a candidate *listing price*; its settlement is derived
+   * from it and compared with the minimum. The reverse — comparing the
+   * benchmark against a settlement — is the mistake the brief calls out, and
+   * these assertions are what would catch it if the two were ever swapped.
+   */
+  [
+    'Benchmark is judged as a listing price: settlement is derived FROM it, never matched against it',
+    () => {
+      // Fees 20 (displayed 200 settles at 180). Minimum 150 -> floor 170.
+      const row = jobRow({
+        listingPrice: 220,
+        flipkartDisplayedPrice: 200,
+        winnerPrice: 200,
+        currentBankSettlement: 180,
+        minimumBankSettlement: 150,
+        benchmarkPrice: 190,
+      });
+      const settlement = computeSettlement(row);
+
+      // Candidate 190 -> settlement 180 + (190 - 200) = 170.
+      const verdict = judgeCandidatePrice(settlement, 190);
+      assert.equal(verdict?.price, 190);
+      assert.equal(verdict?.settlement, 170);
+      assert.equal(verdict?.minimumSettlement, 150);
+      assert.equal(verdict?.safe, true);
+
+      // The benchmark assessment must agree, and must report the *settlement*
+      // it derived — not the benchmark restated.
+      const assessed = assessBenchmarkAsListingPrice(190, settlement);
+      assert.equal(assessed.status, 'BENCHMARK_USABLE');
+      assert.equal(assessed.usableAsListingPrice, true);
+      assert.equal(assessed.verdict?.settlement, 170);
+      assert.notEqual(assessed.verdict?.settlement, 190);
+
+      // settlementAtPrice is the only direction: price in, settlement out.
+      assert.equal(settlementAtPrice(settlement, 190), 170);
+      assert.equal(settlementAtPrice(settlement, 200), 180);
+      assert.equal(settlementAtPrice(settlement, 170), settlement.bankSettlementThreshold);
+    },
+  ],
+
+  [
+    'Test 1 — Buy Box mine, zero orders, benchmark safe: benchmark becomes the Expected Listing Price',
+    () => {
+      const item = recommend(
+        {
+          listingPrice: 220,
+          flipkartDisplayedPrice: 200,
+          winnerPrice: 200,
+          winningSeller: SELLER,
+          currentBankSettlement: 180,
+          minimumBankSettlement: 150,
+          benchmarkPrice: 190,
+          stockCount: 10,
+        },
+        orders(0, 3),
+      );
+
+      assert.equal(item.hasBuybox, true);
+      assert.equal(item.recommendedPrice, 190, 'the benchmark itself is the recommendation');
+      // Derived from the recommended price, never chosen independently.
+      assert.equal(item.projectedSettlement, 170);
+      assert.ok((item.projectedSettlement as number) >= (item.minSettlement as number));
+    },
+  ],
+
+  [
+    'Test 2 — Buy Box mine, zero orders, benchmark unsafe: benchmark rejected, a safe price found instead',
+    () => {
+      // Benchmark 160 would settle at 140, under the 150 minimum. Floor is 170.
+      const item = recommend(
+        {
+          listingPrice: 220,
+          flipkartDisplayedPrice: 200,
+          winnerPrice: 200,
+          winningSeller: SELLER,
+          currentBankSettlement: 180,
+          minimumBankSettlement: 150,
+          benchmarkPrice: 160,
+          stockCount: 10,
+        },
+        orders(0, 3),
+      );
+
+      assert.equal(item.benchmarkStatus, 'BELOW_THRESHOLD');
+      assert.notEqual(item.recommendedPrice, 160, 'the unsafe benchmark must never be recommended');
+
+      if (item.recommendedPrice !== null) {
+        assert.ok(
+          (item.projectedSettlement as number) >= (item.minSettlement as number),
+          'whatever price is recommended must clear the minimum settlement',
+        );
+      }
+    },
+  ],
+
+  [
+    'Test 4 — My Listing: Buy Box mine and no other sellers routes to its own tab, priced off the benchmark',
+    () => {
+      const row = jobRow({
+        listingPrice: 220,
+        flipkartDisplayedPrice: 200,
+        winnerPrice: 200,
+        winningSeller: SELLER,
+        currentBankSettlement: 180,
+        minimumBankSettlement: 150,
+        benchmarkPrice: 190,
+      });
+      // Sole seller: the scrape saw exactly one seller card, which is us.
+      row.result!.sellersScanned = 1;
+
+      const item = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, NO_ORDERS);
+
+      assert.equal(item.category, 'myListing');
+      assert.equal(item.otherSellerCount, 0);
+      assert.equal(item.recommendedPrice, 190);
+      assert.equal(item.projectedSettlement, 170);
+      assert.ok((item.projectedSettlement as number) >= (item.minSettlement as number));
+    },
+  ],
+
+  [
+    'My Listing needs a real seller count — an unreported one is not "no other sellers"',
+    () => {
+      const row = jobRow({
+        listingPrice: 220,
+        flipkartDisplayedPrice: 200,
+        winnerPrice: 200,
+        winningSeller: SELLER,
+        currentBankSettlement: 180,
+        minimumBankSettlement: 150,
+      });
+      row.result!.sellersScanned = undefined;
+
+      const item = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, NO_ORDERS);
+
+      assert.equal(item.otherSellerCount, null);
+      assert.notEqual(item.category, 'myListing');
+
+      // Two sellers is not sole-seller either.
+      row.result!.sellersScanned = 2;
+      const contested = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, NO_ORDERS);
+      assert.equal(contested.otherSellerCount, 1);
+      assert.notEqual(contested.category, 'myListing');
+    },
+  ],
+
+  [
+    'Test 5 — Order Count comes from the orders report, over its whole window, and 0 is a real answer',
+    () => {
+      // 3 units yesterday, 4 units across the baseline -> 7 in the report.
+      const seven: DemandContext = {
+        ordersAvailable: true,
+        observedDays: 11,
+        demand: {
+          fsn: 'FSN00000001',
+          last24hUnits: 3,
+          last24hOrders: 2,
+          historyUnits: 4,
+          historyDays: 10,
+          unitsPerDay: 0.4,
+          activeDays: 3,
+          cancelledUnits: 0,
+          returnedUnits: 0,
+        },
+      };
+
+      const sold = recommend(
+        { flipkartDisplayedPrice: 200, winnerPrice: 200, currentBankSettlement: 180, minimumBankSettlement: 150 },
+        seven,
+      );
+      assert.equal(sold.orderCount, 7);
+
+      // Report read, FSN absent: zero, not unknown.
+      const none = recommend(
+        { flipkartDisplayedPrice: 200, winnerPrice: 200, currentBankSettlement: 180, minimumBankSettlement: 150 },
+        orders(0, 0),
+      );
+      assert.equal(none.orderCount, 0);
+
+      // No report at all: unknown, and must not read as zero.
+      const unknown = recommend({
+        flipkartDisplayedPrice: 200,
+        winnerPrice: 200,
+        currentBankSettlement: 180,
+        minimumBankSettlement: 150,
+      });
+      assert.equal(unknown.orderCount, null);
+    },
+  ],
+
+  [
+    'Already correct: matching the winner with zero orders is re-priced, not ticked off',
+    () => {
+      const base = {
+        listingPrice: 220,
+        flipkartDisplayedPrice: 200,
+        winnerPrice: 200,
+        winningSeller: 'Some Other Seller',
+        currentBankSettlement: 180,
+        minimumBankSettlement: 150,
+        benchmarkPrice: 190,
+      } as const;
+
+      // Selling: nothing to do, the price is working.
+      const selling = recommend({ ...base }, orders(4, 3));
+      assert.equal(selling.category, 'alreadyCorrect');
+      assert.equal(selling.recommendedPrice, null);
+
+      // Not selling: eligible but not effective, so the benchmark gets a turn.
+      const stale = recommend({ ...base }, orders(0, 0));
+      assert.equal(stale.category, 'priceChange');
+      assert.equal(stale.recommendedPrice, 190);
+      assert.equal(stale.projectedSettlement, 170);
+      assert.ok((stale.projectedSettlement as number) >= (stale.minSettlement as number));
+
+      // With no orders report at all nothing changes — unknown is not zero.
+      const noReport = recommend({ ...base });
+      assert.equal(noReport.category, 'alreadyCorrect');
+      assert.equal(noReport.recommendedPrice, null);
+    },
+  ],
+
+  [
+    'Test 6 — the support message lists every Needs-review FSN, de-duplicated',
+    () => {
+      const message = buildSupportMessage([
+        { fsn: 'FSN-1' },
+        { fsn: 'FSN-2' },
+        { fsn: 'FSN-1' },
+        { fsn: '' },
+        { fsn: 'FSN-3' },
+      ]);
+
+      assert.ok(message.includes('not visible in the Flipkart seller panel'));
+      assert.ok(message.includes('FSN List (3):'));
+      assert.ok(message.includes('\nFSN-1'));
+      assert.ok(message.includes('\nFSN-2'));
+      assert.ok(message.includes('\nFSN-3'));
+      // De-duplicated, and the blank row contributes nothing.
+      assert.equal(message.split('FSN-1').length - 1, 1);
+    },
+  ],
+
+  [
+    'Every recommended price in every category clears the minimum settlement',
+    () => {
+      // A sweep rather than a single case: the settlement floor is the one
+      // invariant no tab, rule or new branch is allowed to break.
+      const prices = [80, 150, 200, 260];
+      const benchmarks = [0, 120, 160, 190, 240];
+      const sellers = [undefined, 1, 2, 5];
+      const demands: DemandContext[] = [NO_ORDERS, orders(0, 0), orders(0, 3), orders(4, 2)];
+      let checked = 0;
+
+      for (const winnerPrice of prices) {
+        for (const benchmarkPrice of benchmarks) {
+          for (const sellersScanned of sellers) {
+            for (const demand of demands) {
+              const row = jobRow({
+                listingPrice: 220,
+                flipkartDisplayedPrice: 200,
+                winnerPrice,
+                winningSeller: winnerPrice === 200 ? SELLER : 'Some Other Seller',
+                currentBankSettlement: 180,
+                minimumBankSettlement: 150,
+                benchmarkPrice,
+                stockCount: 10,
+              });
+              row.result!.sellersScanned = sellersScanned;
+
+              const item = recommendForRow(row, computeSettlement(row), EMPTY_HISTORY, undefined, demand);
+              checked += 1;
+
+              if (item.recommendedPrice === null) continue;
+              assert.ok(
+                item.projectedSettlement !== null,
+                `${item.category}/${item.rule}: recommended ${item.recommendedPrice} with no settlement`,
+              );
+              assert.ok(
+                (item.projectedSettlement as number) >= (item.minSettlement as number),
+                `${item.category}/${item.rule}: ${item.recommendedPrice} settles at ${item.projectedSettlement}, under ${item.minSettlement}`,
+              );
+            }
+          }
+        }
+      }
+      assert.equal(checked, 320);
     },
   ],
 ];

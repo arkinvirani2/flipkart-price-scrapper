@@ -60,6 +60,8 @@ export interface JobOptions {
   concurrency: number;
   /** Floor on the gap between requests to Flipkart. The real rate-limit guard. */
   requestGapMs: number;
+  /** After the main pass, give every failed product one more attempt. */
+  retryFailedProducts: boolean;
 }
 
 export const DEFAULT_JOB_OPTIONS: JobOptions = {
@@ -79,6 +81,7 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   // full 202-product batch, with headroom below the rate the limit appears at.
   concurrency: 6,
   requestGapMs: 120,
+  retryFailedProducts: true,
 };
 
 /**
@@ -94,6 +97,8 @@ export interface RecommendationCounts {
   settlementUnsafe: number;
   buyboxWon: number;
   needsReview: number;
+  /** Buy Box ours and nobody else lists the product. Optional: older files predate it. */
+  myListing?: number;
 }
 
 /**

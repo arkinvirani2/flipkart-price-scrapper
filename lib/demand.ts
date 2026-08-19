@@ -69,3 +69,15 @@ export function emptyDemand(fsn: string, historyDays: number): FsnDemand {
 export function demandFor(report: OrdersReport, fsn: string): FsnDemand {
   return report.byFsn[fsn] ?? emptyDemand(fsn, report.observedDays - 1);
 }
+
+/**
+ * Every unit this FSN sold across the whole report — the "Order Count".
+ *
+ * The report is already split into the trailing 24 hours and the baseline
+ * before it, and those two halves are the whole file by construction, so their
+ * sum is the total. Derived rather than stored so reports parsed before this
+ * existed answer the question too, with no re-upload.
+ */
+export function totalUnitsFor(demand: FsnDemand): number {
+  return demand.last24hUnits + demand.historyUnits;
+}

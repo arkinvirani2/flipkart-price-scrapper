@@ -129,6 +129,16 @@ export interface ScraperOptions {
    * Flipkart does push back, then walks it back down as calls succeed.
    */
   requestGapMs?: number;
+  /**
+   * After the main pass, give every failed product one more attempt.
+   *
+   * A failure costs one request to re-check, so asking again is cheaper than
+   * handing the user a row to chase by hand. The retry may only *improve* a
+   * row — a result is written back only when it comes out OK — so a product
+   * that genuinely cannot be read keeps its original classification and no
+   * retry can turn a good row bad. Fast path only.
+   */
+  retryFailedProducts?: boolean;
   /** Skip clicking and navigate straight to /sellers?pid=... when we can. */
   preferDirectSellerNavigation?: boolean;
   /** Emit progress logs. */

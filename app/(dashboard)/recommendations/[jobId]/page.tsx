@@ -11,6 +11,7 @@ import {
   Package,
   RefreshCw,
   ShieldAlert,
+  Store,
   Tag,
   Trophy,
 } from 'lucide-react';
@@ -21,12 +22,14 @@ import {
   ALREADY_CORRECT_COLUMNS,
   BUYBOX_NO_ORDERS_COLUMNS,
   BUYBOX_WON_COLUMNS,
+  MY_LISTING_COLUMNS,
   NEEDS_REVIEW_COLUMNS,
   PRICE_CHANGE_COLUMNS,
   RecommendationTable,
   SETTLEMENT_UNSAFE_COLUMNS,
 } from '@/components/recommendations/RecommendationTable';
 import { RecommendationDetailDialog } from '@/components/recommendations/RecommendationDetailDialog';
+import { SupportTicketMessage } from '@/components/recommendations/SupportTicketMessage';
 import { StatCard } from '@/components/dashboard/StatCard';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -77,6 +80,7 @@ export default function RecommendationsPage() {
       settlementUnsafe: [] as Recommendation[],
       buyboxWon: [] as Recommendation[],
       needsReview: [] as Recommendation[],
+      myListing: [] as Recommendation[],
     };
     for (const item of file?.recommendations ?? []) empty[item.category].push(item);
     return empty;
@@ -265,6 +269,13 @@ export default function RecommendationsPage() {
             Buy Box won — no orders
             <CountBadge value={buybox.noOrders.length} />
           </TabsTrigger>
+          {buckets.myListing.length > 0 && (
+            <TabsTrigger value="myListing">
+              <Store className="mr-1.5 size-4" />
+              My Listing
+              <CountBadge value={buckets.myListing.length} />
+            </TabsTrigger>
+          )}
           {counts.needsReview > 0 && (
             <TabsTrigger value="needsReview">
               <CircleHelp className="mr-1.5 size-4" />
@@ -358,11 +369,28 @@ export default function RecommendationsPage() {
           />
         </TabsContent>
 
+        {buckets.myListing.length > 0 && (
+          <TabsContent value="myListing" className="mt-0 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Products where the Buy Box is ours because nobody else lists them. There is no
+              competitor to match, so the price is led by Flipkart&apos;s benchmark and floored by
+              the minimum settlement.
+            </p>
+            <RecommendationTable
+              rows={buckets.myListing}
+              columns={MY_LISTING_COLUMNS}
+              emptyMessage="No sole-seller listings in this batch."
+              onView={setDetail}
+            />
+          </TabsContent>
+        )}
+
         {counts.needsReview > 0 && (
           <TabsContent value="needsReview" className="mt-0 space-y-2">
             <p className="text-xs text-muted-foreground">
               No rule could be applied — the reason is on each row.
             </p>
+            <SupportTicketMessage items={buckets.needsReview} />
             <RecommendationTable
               rows={buckets.needsReview}
               columns={NEEDS_REVIEW_COLUMNS}

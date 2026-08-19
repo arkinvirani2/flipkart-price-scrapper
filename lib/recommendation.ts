@@ -19,9 +19,9 @@
  * the two screens can never disagree about whether a price is affordable.
  */
 
-import type { Settlement } from '@/lib/settlement';
+import { judgeCandidatePrice, settlementAtPrice, type CandidateVerdict, type Settlement } from '@/lib/settlement';
 import type { RankedPredictor } from '@/lib/intelligence/types';
-import { emptyDemand, type FsnDemand } from '@/lib/demand';
+import { emptyDemand, totalUnitsFor, type FsnDemand } from '@/lib/demand';
 import type { JobRow, RecommendationCounts } from '@/types/dashboard';
 
 /* -------------------------------------------------------------- categories */
@@ -37,7 +37,15 @@ export type RecommendationCategory =
    * recommendation, and silently filing it under one of the other four would
    * misreport it. It surfaces as its own tab only when it is non-empty.
    */
-  | 'needsReview';
+  | 'needsReview'
+  /**
+   * The Buy Box is ours and no one else lists the product at all. Sole seller:
+   * there is no competitor to match or undercut, so the ordinary rules — which
+   * are all phrased against a winner who is someone else — have nothing to say.
+   * Split out so those rows get benchmark-led pricing instead of being filed
+   * under a Buy Box win that was never contested.
+   */
+  | 'myListing';
 
 export const RECOMMENDATION_CATEGORY_LABEL: Record<RecommendationCategory, string> = {
   priceChange: 'Price change',
@@ -45,6 +53,7 @@ export const RECOMMENDATION_CATEGORY_LABEL: Record<RecommendationCategory, strin
   settlementUnsafe: 'Settlement unsafe',
   buyboxWon: 'Buy Box won',
   needsReview: 'Needs review',
+  myListing: 'My Listing',
 };
 
 export type RuleId =
@@ -267,6 +276,63 @@ export function minimumAcceptablePrice(settlement: Settlement): number | null {
   return sellerPrice + (bankSettlementThreshold - currentBankSettlement);
 }
 
+/* ------------------------------------------- benchmark as a listing price */
+
+/**
+ * Flipkart's Benchmark Price, judged the way every candidate price is judged.
+ *
+ * The direction here is the one thing the pricing brief is most insistent
+ * about, so it is worth stating plainly:
+ *
+ *     Benchmark Price
+ *         -> treat as a candidate Expected Listing Price
+ *         -> calculate the settlement THAT price would produce
+ *         -> compare that settlement with the Minimum Allowed Settlement
+ *
+ * The benchmark is never compared against a settlement, and the expected
+ * settlement is never chosen and worked backwards from. `judgeCandidatePrice`
+ * is the only thing that decides, and it is the same function every other
+ * candidate price goes through, so the two can never drift apart.
+ *
+ * Returns the verdict alongside the status the rest of the module already
+ * speaks in, so existing `reasonCode` behaviour is unchanged.
+ */
+export interface BenchmarkAssessment {
+  status: BenchmarkStatus;
+  /** Null when there is no benchmark to judge. */
+  verdict: CandidateVerdict | null;
+  /** True when the benchmark can be recommended as the listing price outright. */
+  usableAsListingPrice: boolean;
+}
+
+export function assessBenchmarkAsListingPrice(
+  benchmarkPrice: number | null,
+  settlement: Settlement,
+): BenchmarkAssessment {
+  if (benchmarkPrice === null) {
+    return { status: 'BENCHMARK_MISSING', verdict: null, usableAsListingPrice: false };
+  }
+  // Flipkart writes 0 when it has no market read for a listing — an absence
+  // dressed as a number. Treating it as a price would recommend giving the
+  // product away, so it is never a price here.
+  if (benchmarkPrice <= 0) {
+    return { status: 'BENCHMARK_ZERO', verdict: null, usableAsListingPrice: false };
+  }
+
+  const verdict = judgeCandidatePrice(settlement, benchmarkPrice);
+
+  // No floor to test against. The benchmark is a real number and stays usable
+  // as an anchor — this is the long-standing meaning of BENCHMARK_USABLE and
+  // callers that need a *proved* price check the settlement values themselves.
+  if (verdict === null || verdict.minimumSettlement === null || verdict.settlement === null) {
+    return { status: 'BENCHMARK_USABLE', verdict, usableAsListingPrice: false };
+  }
+
+  return verdict.safe
+    ? { status: 'BENCHMARK_USABLE', verdict, usableAsListingPrice: true }
+    : { status: 'BELOW_THRESHOLD', verdict, usableAsListingPrice: false };
+}
+
 /* ----------------------------------------------------------------- history */
 
 /** One previous appearance of an FSN, in one previous upload for this account. */
@@ -411,8 +477,24 @@ export interface Recommendation {
   minAcceptablePrice: number | null;
   /** Units sold in the last 24h. Null only when no orders report was uploaded. */
   ordersLast24h: number | null;
+  /**
+   * Units this FSN sold across the *whole* latest orders report.
+   *
+   * The Buy Box tab's "Order Count". Zero and null mean different things and
+   * both are real answers: zero is "the report was read and this FSN is not in
+   * it", null is "no orders report was uploaded, so nobody knows".
+   */
+  orderCount: number | null;
   /** What this FSN normally sells per day. Null without an orders report. */
   historicalUnitsPerDay: number | null;
+  /**
+   * Sellers on the listing besides our own, from the scrape.
+   *
+   * Null when the scrape did not report a seller count, which is not zero — a
+   * missing count must never be read as "sole seller" and route a row into My
+   * Listing on the strength of an absence.
+   */
+  otherSellerCount: number | null;
   /** The zero-order evidence, when the Buy Box layer ran. */
   demand?: DemandEvidence;
   /**
@@ -554,6 +636,30 @@ export interface SettlementUnsafeTarget {
  * engine gave it, and stays on the Settlement unsafe list either way.
  */
 export function settlementUnsafeTarget(item: Recommendation): SettlementUnsafeTarget {
+  // The engine now runs the safe-price search itself and puts the answer on the
+  // row, so read it rather than deriving a second one here. The block below is
+  // the same search expressed in display terms, kept only for recommendation
+  // files written before the engine carried a price on these rows.
+  //
+  // `projectedSettlement` is required, not decoration: a price with no known
+  // settlement is a price nothing proved affordable — the Buy Box path sets one
+  // when the bank-settlement values are missing precisely so the row is not left
+  // blank — and quoting it here as an Expected Listing Price would present an
+  // unchecked number as a checked one.
+  if (item.recommendedPrice !== null && item.projectedSettlement !== null) {
+    const target = item.recommendedPrice;
+    const change = item.currentPrice === null ? null : target - item.currentPrice;
+    const listed = currentListingPrice(item);
+
+    return {
+      benchmarkUsable: item.benchmarkStatus === 'BENCHMARK_USABLE' && item.benchmarkPrice === target,
+      target,
+      change,
+      expectedListingPrice: listed === null || change === null ? null : listed + change,
+      expectedBankSettlement: item.projectedSettlement,
+    };
+  }
+
   const benchmarkUsable =
     item.benchmarkStatus === 'BENCHMARK_USABLE' &&
     item.benchmarkPrice !== null &&
@@ -632,6 +738,17 @@ function money(value: number): string {
   return `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
+/**
+ * ", and N units sold in the latest orders report" — or nothing at all when no
+ * report was uploaded, because silence is honest and "0 orders" would not be.
+ */
+function orderCountSentence(demand: FsnDemand | null): string {
+  if (demand === null) return '';
+  const units = totalUnitsFor(demand);
+  if (units === 0) return ', and the latest orders report shows no orders';
+  return `, and ${units} unit${units === 1 ? '' : 's'} sold in the latest orders report`;
+}
+
 /** A chosen price, before the settlement gate has had its say. */
 export interface TargetChoice {
   target: number;
@@ -705,6 +822,128 @@ function normalTarget(
   return learned ?? staticRuleTarget(myPrice, winnerPrice, history);
 }
 
+/* ------------------------------------------- the safe-listing-price search */
+
+/** Where a recommended listing price came from. */
+export type PriceSource = 'benchmark' | 'algorithm' | 'floor' | 'none';
+
+export interface SafePriceOutcome {
+  /** The Expected Listing Price. Null when nothing could be proved safe. */
+  price: number | null;
+  /** Its Expected Settlement Price — always derived from `price`, never chosen. */
+  settlement: number | null;
+  source: PriceSource;
+  /** One sentence explaining the choice, for the Recommendation Reason column. */
+  reason: string;
+  /** The rules that took part, so the audit trail survives. */
+  appliedRules: RuleId[];
+  rule: RuleId;
+}
+
+/**
+ * Find a listing price that settles at or above the minimum.
+ *
+ * This is section 13 of the pricing brief, written once and shared by every tab
+ * that needs it — Already correct, Settlement unsafe and My Listing all call
+ * this rather than carrying a copy. The candidates are tried in order of
+ * preference and *each one* is judged the same way: calculate the settlement
+ * that price would produce, then compare it with the minimum.
+ *
+ *   1. Flipkart's Benchmark Price. A published market read beats anything we
+ *      infer, so it is asked first.
+ *   2. The existing pricing algorithm — rules 4/6/7, or the learned champion
+ *      that replaces them. Unchanged, and reused rather than reimplemented.
+ *   3. The floor itself. `minAcceptablePrice` is the price that settles at
+ *      exactly the minimum, so it is the terminating candidate: if it is not
+ *      safe, nothing is, and the search cannot loop forever.
+ *
+ * Returns `source: 'none'` when the settlement values are missing, because then
+ * no price can be *proved* safe and guessing one is the failure mode the whole
+ * gate exists to prevent.
+ */
+export function chooseSafeListingPrice(input: {
+  settlement: Settlement;
+  benchmark: BenchmarkAssessment;
+  minAcceptablePrice: number | null;
+  myPrice: number;
+  winnerPrice: number | null;
+  history: RecommendationHistorySummary;
+  learned?: LearnedChoice;
+}): SafePriceOutcome {
+  const { settlement, benchmark, minAcceptablePrice, myPrice, winnerPrice, history, learned } = input;
+
+  /* ---- candidate 1: Flipkart's benchmark ------------------------------- */
+
+  if (benchmark.usableAsListingPrice && benchmark.verdict !== null) {
+    return {
+      price: benchmark.verdict.price,
+      settlement: benchmark.verdict.settlement,
+      source: 'benchmark',
+      rule: 'RULE_13',
+      appliedRules: ['RULE_13', 'RULE_2'],
+      reason: `Benchmark Price ${money(
+        benchmark.verdict.price,
+      )} can safely be used as the Expected Listing Price because the settlement it produces, ${money(
+        benchmark.verdict.settlement as number,
+      )}, is at or above the ${money(benchmark.verdict.minimumSettlement as number)} minimum allowed settlement.`,
+    };
+  }
+
+  const benchmarkRejected =
+    benchmark.status === 'BELOW_THRESHOLD' && benchmark.verdict !== null
+      ? `Benchmark Price ${money(benchmark.verdict.price)} would settle at ${money(
+          benchmark.verdict.settlement as number,
+        )}, below the ${money(
+          benchmark.verdict.minimumSettlement as number,
+        )} minimum allowed settlement, so it was rejected. `
+      : '';
+
+  /* ---- candidate 2: the existing pricing algorithm --------------------- */
+
+  const algorithmic = winnerPrice === null ? null : normalTarget(myPrice, winnerPrice, history, learned);
+  if (algorithmic !== null) {
+    const verdict = judgeCandidatePrice(settlement, algorithmic.target);
+    if (verdict?.safe) {
+      return {
+        price: verdict.price,
+        settlement: verdict.settlement,
+        source: 'algorithm',
+        rule: algorithmic.rule,
+        appliedRules: [...algorithmic.appliedRules, 'RULE_2'],
+        reason: `${benchmarkRejected}${algorithmic.reason} That price settles at ${money(
+          verdict.settlement as number,
+        )}, at or above the ${money(verdict.minimumSettlement as number)} minimum.`,
+      };
+    }
+  }
+
+  /* ---- candidate 3: the floor, which settles exactly at the minimum ----- */
+
+  const floorVerdict = judgeCandidatePrice(settlement, minAcceptablePrice);
+  if (floorVerdict?.safe) {
+    return {
+      price: floorVerdict.price,
+      settlement: floorVerdict.settlement,
+      source: 'floor',
+      rule: 'RULE_2',
+      appliedRules: ['RULE_2', 'RULE_9'],
+      reason: `${benchmarkRejected}No higher candidate cleared the minimum, so the Expected Listing Price is the lowest price that still settles at the ${money(
+        floorVerdict.minimumSettlement as number,
+      )} minimum: ${money(floorVerdict.price)}, settling at ${money(floorVerdict.settlement as number)}.`,
+    };
+  }
+
+  return {
+    price: null,
+    settlement: null,
+    source: 'none',
+    rule: 'RULE_2',
+    appliedRules: ['RULE_2'],
+    reason:
+      'The bank-settlement values are missing for this SKU, so no Expected Listing Price can be proved safe. Fill in the minimum settlement and re-run.',
+  };
+}
+
 /**
  * Apply the rules to one scraped row.
  *
@@ -735,8 +974,15 @@ export function recommendForRow(
   const minSettlement = settlement.bankSettlementThreshold;
 
   const benchmarkPrice = row.benchmarkPrice ?? null;
+  // The scrape counts every seller including us, so "other sellers" is one
+  // fewer. Null stays null: an unreported count is not a count of zero.
+  const scanned = row.result?.sellersScanned ?? null;
+  const otherSellers = scanned === null ? null : Math.max(0, scanned - 1);
   const minAcceptablePrice = minimumAcceptablePrice(settlement);
-  const benchmarkStatus = classifyBenchmark(benchmarkPrice, minAcceptablePrice);
+  // Benchmark Price -> candidate listing price -> its settlement -> the minimum.
+  // Never benchmark against a settlement; see assessBenchmarkAsListingPrice.
+  const benchmark = assessBenchmarkAsListingPrice(benchmarkPrice, settlement);
+  const benchmarkStatus = benchmark.status;
   const demand = demandContext.ordersAvailable
     ? // No rows for an FSN means it sold nothing, so a zeroed record is the
       // truthful reading — see lib/orders.
@@ -768,7 +1014,9 @@ export function recommendForRow(
     benchmarkStatus,
     minAcceptablePrice,
     ordersLast24h: demand?.last24hUnits ?? null,
+    orderCount: demand === null ? null : totalUnitsFor(demand),
     historicalUnitsPerDay: demand?.unitsPerDay ?? null,
+    otherSellerCount: otherSellers,
     confidence: 0,
     history,
     // Carried on every outcome, not just the ones the champion priced: the
@@ -814,6 +1062,45 @@ export function recommendForRow(
   // so the detail view can say so out loud.
   const applied: RuleId[] = history.uploads === 0 ? ['RULE_10'] : [];
 
+  const safePrice = (): SafePriceOutcome =>
+    chooseSafeListingPrice({
+      settlement,
+      benchmark,
+      minAcceptablePrice,
+      myPrice,
+      winnerPrice,
+      history,
+      learned,
+    });
+
+  /* ---- My Listing: ours, and nobody else lists it ------------------------ */
+
+  // Checked before the Buy Box layer because it is a strictly narrower case of
+  // it. Holding the Buy Box against no competition is not a Buy Box "win" —
+  // there was no contest — so rules 11-14, which are all reasoning about a
+  // market we are beating, have nothing to say. The price is led by Flipkart's
+  // benchmark instead, floored by the minimum settlement like everything else.
+  if (settlement.hasBuybox === true && otherSellers === 0) {
+    const chosen = safePrice();
+    const changes = chosen.price !== null && chosen.price !== myPrice;
+
+    return {
+      ...base,
+      demand: undefined,
+      confidence: chosen.source === 'none' ? 0 : 1,
+      recommendedPrice: changes ? chosen.price : null,
+      priceDelta: changes ? (chosen.price as number) - myPrice : null,
+      projectedSettlement: chosen.settlement,
+      category: 'myListing',
+      rule: chosen.rule,
+      appliedRules: [...applied, 'RULE_1', ...chosen.appliedRules],
+      reasonCode: benchmarkStatus,
+      reason: `Sole seller — the Buy Box is ours because no one else lists this product${
+        orderCountSentence(demand)
+      }. ${chosen.reason}${changes ? '' : ' The current price already matches that, so nothing needs changing.'}`,
+    };
+  }
+
   /* ---- rule 1 + rules 11-14: already winning ---------------------------- */
 
   if (settlement.hasBuybox === true) {
@@ -838,13 +1125,53 @@ export function recommendForRow(
   /* ---- rule 3: matching the winner already ------------------------------ */
 
   if (winnerPrice === myPrice) {
+    // Matching the winner is only "correct" while the listing is converting.
+    // A price that ties the Buy Box and still sells nothing is a price the
+    // customer looked at and declined — eligible, but not effective — so the
+    // benchmark-led search gets a turn before the row is ticked off.
+    const stale = demand !== null && totalUnitsFor(demand) === 0;
+
+    if (stale) {
+      const chosen = safePrice();
+      const changes = chosen.price !== null && chosen.price !== myPrice;
+
+      if (changes) {
+        return {
+          ...base,
+          confidence: 1,
+          recommendedPrice: chosen.price,
+          priceDelta: (chosen.price as number) - myPrice,
+          projectedSettlement: chosen.settlement,
+          category: 'priceChange',
+          rule: chosen.rule,
+          appliedRules: [...applied, 'RULE_3', ...chosen.appliedRules],
+          reasonCode: 'BUYBOX_STALE_REDUCE',
+          reason: `Matching the winner price at ${money(
+            myPrice,
+          )}, but the latest orders report shows no orders at that price — the listing is eligible, not effective. ${chosen.reason}`,
+        };
+      }
+
+      return {
+        ...base,
+        category: 'alreadyCorrect',
+        rule: 'RULE_3',
+        appliedRules: [...applied, 'RULE_3'],
+        reasonCode: benchmarkStatus,
+        projectedSettlement: chosen.settlement,
+        reason: `Already matching winner price, and no orders at it — but no safer or better listing price could be found${
+          chosen.source === 'none' ? ' because the bank-settlement values are missing' : ''
+        }, so the price stands.`,
+      };
+    }
+
     return {
       ...base,
       category: 'alreadyCorrect',
       rule: 'RULE_3',
       appliedRules: [...applied, 'RULE_3'],
       reasonCode: benchmarkStatus,
-      reason: 'Already matching winner price.',
+      reason: `Already matching winner price${orderCountSentence(demand)}.`,
     };
   }
 
@@ -902,16 +1229,28 @@ export function recommendForRow(
   const projected = currentSettlement + (target - myPrice);
 
   if (target <= 0 || projected < minSettlement) {
+    // The row stays settlement-unsafe — chasing this winner is not affordable,
+    // and that is the finding. But "unsafe" on its own is not actionable, so the
+    // search runs anyway and the row carries the best listing price that *does*
+    // clear the minimum, with the settlement it would produce.
+    const chosen = safePrice();
+    const changes = chosen.price !== null && chosen.price !== myPrice;
+
     return {
       ...base,
-      projectedSettlement: projected,
+      recommendedPrice: changes ? chosen.price : null,
+      priceDelta: changes ? (chosen.price as number) - myPrice : null,
+      // The settlement of the price actually being recommended, not of the
+      // unaffordable target that got us here.
+      projectedSettlement: chosen.price !== null ? chosen.settlement : projected,
+      confidence: chosen.source === 'none' ? 0 : 1,
       category: 'settlementUnsafe',
       rule: 'RULE_9',
-      appliedRules: [...applied, 'RULE_2', 'RULE_9'],
+      appliedRules: [...applied, 'RULE_2', 'RULE_9', ...chosen.appliedRules],
       reasonCode: benchmarkStatus,
-      reason: `Dropping to ${money(target)} would settle at ${money(projected)}, below the minimum ${money(
-        minSettlement,
-      )} — not worth winning.`,
+      reason: `Matching the winner would mean dropping to ${money(target)}, settling at ${money(
+        projected,
+      )} against a ${money(minSettlement)} minimum — settlement unsafe. ${chosen.reason}`,
     };
   }
 
@@ -1278,16 +1617,6 @@ function staleTarget(input: {
   return Math.ceil(Math.max(desired, cutCap, floor));
 }
 
-/** Where the benchmark stands relative to the floor. Always answerable. */
-function classifyBenchmark(benchmarkPrice: number | null, floor: number | null): BenchmarkStatus {
-  if (benchmarkPrice === null) return 'BENCHMARK_MISSING';
-  // Flipkart writes 0 when it has no market read for a listing — an absence
-  // dressed as a number. Treating it as a price would recommend giving the
-  // product away, so it is never a price here.
-  if (benchmarkPrice <= 0) return 'BENCHMARK_ZERO';
-  if (floor !== null && benchmarkPrice < floor) return 'BELOW_THRESHOLD';
-  return 'BENCHMARK_USABLE';
-}
 
 /* ------------------------------------------------------------ aggregation */
 
@@ -1299,15 +1628,16 @@ export function countRecommendations(list: Recommendation[]): RecommendationCoun
     settlementUnsafe: 0,
     buyboxWon: 0,
     needsReview: 0,
+    myListing: 0,
   };
 
-  for (const item of list) counts[item.category] += 1;
+  for (const item of list) counts[item.category] = (counts[item.category] ?? 0) + 1;
   return counts;
 }
 
 /** One line for the batch list, so an upload's outcome reads without opening it. */
 export function summarizeRecommendations(counts: RecommendationCounts): string {
   return `${counts.priceChange} of ${counts.total} SKUs need a price change — ${counts.alreadyCorrect} already correct, ${counts.buyboxWon} winning the Buy Box, ${counts.settlementUnsafe} settlement-unsafe${
-    counts.needsReview ? `, ${counts.needsReview} need review` : ''
-  }.`;
+    counts.myListing ? `, ${counts.myListing} sole-seller listings` : ''
+  }${counts.needsReview ? `, ${counts.needsReview} need review` : ''}.`;
 }

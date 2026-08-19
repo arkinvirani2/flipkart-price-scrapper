@@ -95,6 +95,7 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // sitting on the limit.
   concurrency: 6,
   requestGapMs: 120,
+  retryFailedProducts: true,
   preferDirectSellerNavigation: true,
   verbose: true,
   // Zero keeps single-product and small-batch runs exactly as fast as before.

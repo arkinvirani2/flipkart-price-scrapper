@@ -169,7 +169,31 @@ const ORDERS_COLUMN: SortableColumn = {
 };
 
 /** The zero-order test, and how much weight it carries. */
+/**
+ * Every unit this FSN sold across the whole latest orders report.
+ *
+ * Deliberately taken from the orders report and nothing else — holding the Buy
+ * Box is not evidence of an order, which is the confusion this column exists to
+ * settle. A dash means no report was uploaded; a red 0 means the report was read
+ * and this FSN is not in it.
+ */
+const ORDER_COUNT_COLUMN: SortableColumn = {
+  key: 'orderCount',
+  header: 'Order count',
+  align: 'right',
+  sortValue: (item) => item.orderCount ?? null,
+  cell: (item) =>
+    item.orderCount === null || item.orderCount === undefined ? (
+      <span className="text-muted-foreground" title="No orders report has been uploaded for this account">
+        —
+      </span>
+    ) : (
+      <span className={cn(item.orderCount === 0 && 'font-medium text-status-failed')}>{item.orderCount}</span>
+    ),
+};
+
 const DEMAND_COLUMNS: SortableColumn[] = [
+  ORDER_COUNT_COLUMN,
   ORDERS_COLUMN,
   {
     key: 'historicalUnitsPerDay',
@@ -328,11 +352,62 @@ export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
   },
 ];
 
+/**
+ * Already correct.
+ *
+ * The order count sits next to the prices on purpose: a row is only "correct"
+ * while it is converting, and a 0 here is what sends the same SKU to Price
+ * change with a benchmark-led price instead of being ticked off.
+ */
 export const ALREADY_CORRECT_COLUMNS: SortableColumn[] = [
   ...IDENTITY_COLUMNS,
   ...CALCULATION_COLUMNS,
   WINNER_COLUMN,
+  ORDER_COUNT_COLUMN,
   ORDERS_COLUMN,
+  REASON_COLUMN,
+];
+
+/**
+ * My Listing — the Buy Box is ours and nobody else lists the product.
+ *
+ * There is no winner column here because there is no competitor: the price is
+ * led by Flipkart's benchmark, floored by the minimum settlement, so the row
+ * reads benchmark -> expected listing price -> expected settlement -> minimum.
+ */
+export const MY_LISTING_COLUMNS: SortableColumn[] = [
+  ...IDENTITY_COLUMNS,
+  CURRENT_LISTING_PRICE_COLUMN,
+  FLIPKART_DISPLAYED_COLUMN,
+  BENCHMARK_COLUMN,
+  {
+    key: 'myListingExpectedPrice',
+    header: 'Expected listing price',
+    align: 'right',
+    sortValue: (item) => expectedListingPriceAtRecommendation(item),
+    cell: (item) => (
+      <span className="font-semibold text-status-success">
+        {formatPrice(expectedListingPriceAtRecommendation(item))}
+      </span>
+    ),
+  },
+  {
+    key: 'myListingExpectedSettlement',
+    header: 'Expected bank settlement',
+    align: 'right',
+    sortValue: (item) => item.projectedSettlement,
+    cell: (item) => (
+      <span className="font-semibold text-status-success">{formatSettlement(item.projectedSettlement)}</span>
+    ),
+  },
+  {
+    key: 'minSettlement',
+    header: 'Minimum bank settlement',
+    align: 'right',
+    sortValue: (item) => item.minSettlement,
+    cell: (item) => formatSettlement(item.minSettlement),
+  },
+  ORDER_COUNT_COLUMN,
   REASON_COLUMN,
 ];
 
