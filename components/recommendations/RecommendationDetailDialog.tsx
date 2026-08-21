@@ -10,26 +10,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { formatDateTime, formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
-import {
-  BENCHMARK_STATUS_LABEL,
-  currentListingPrice,
-  expectedBankSettlement,
-  expectedListingPrice,
-  priceDifference,
-  RECOMMENDATION_CATEGORY_LABEL,
-  RULE_LABEL,
-  type Recommendation,
-} from '@/lib/recommendation';
+import { formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
+import { RECOMMENDATION_CATEGORY_LABEL, type Recommendation } from '@/lib/recommendation';
 import { sellerListingUrl } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 
 /**
- * Everything behind one recommendation, on one screen.
+ * One record's figures, on one screen.
  *
- * The point of this dialog is that a price on a list is only actionable if the
- * user can see why it is there — so the rule, the reason and the account's own
- * history for this FSN are shown alongside the figures, not summarised away.
+ * Every value shown here is one of the figures the tabs are defined on — the
+ * three sheets' inputs and the three subtractions derived from them. Nothing is
+ * summarised or explained away, because there is nothing behind them to explain:
+ * the tab a record sits in is the first filter it passed.
  */
 
 export function RecommendationDetailDialog({
@@ -54,216 +46,121 @@ function DetailBody({ item }: { item: Recommendation }) {
       <DialogHeader>
         <div className="flex flex-wrap items-center gap-2">
           <DialogTitle className="truncate">{item.sku}</DialogTitle>
-          <Badge variant="secondary">{RECOMMENDATION_CATEGORY_LABEL[item.category]}</Badge>
-          <Badge variant="outline" className="font-mono text-[11px] font-normal">
-            {item.reasonCode}
+          <Badge variant="secondary">
+            {item.category === null ? 'No tab' : RECOMMENDATION_CATEGORY_LABEL[item.category]}
           </Badge>
         </div>
         <DialogDescription className="tabular">
-          FSN {item.fsn} · {item.accountName}
+          FSN {item.fsn} · {item.seller}
         </DialogDescription>
       </DialogHeader>
 
       <div className="space-y-5">
+        {/* Sheet 1 and the scrape, side by side: the listing price is what the
+            seller edits, the displayed price is what a buyer actually sees. */}
         <section className="grid gap-3 sm:grid-cols-3">
-          <Figure label="Current listing price" value={formatPrice(currentListingPrice(item))} hint="From the listing sheet" />
           <Figure
-            label="Flipkart displayed price"
-            value={formatPrice(item.currentPrice)}
-            hint="What Flipkart shows for our listing"
+            label="Current listing price"
+            value={formatPrice(item.listingPrice)}
+            hint="Your listing price, from the listing sheet"
+          />
+          <Figure
+            label="Flipkart display our price"
+            value={formatPrice(item.flipkartDisplayPrice)}
+            hint="What Flipkart shows a buyer for our listing"
           />
           <Figure
             label="Winner price"
             value={formatPrice(item.winnerPrice)}
-            hint={item.winningSeller ? `Winner: ${item.winningSeller}` : 'No winning seller was read'}
+            hint={item.winnerSeller ? `Winner seller: ${item.winnerSeller}` : 'No winner seller was read'}
           />
         </section>
 
-        {/* The calculation, in the order it is done: the Difference is added to
-            the current listing price and to the current bank settlement. */}
         <section className="grid gap-3 sm:grid-cols-3">
           <Figure
             label="Change"
-            value={formatSignedNumber(priceDifference(item))}
-            hint="Winner price − Flipkart displayed price"
+            value={formatSignedNumber(item.difference)}
+            hint="Winner price − Flipkart display our price"
           />
           <Figure
+            label="Benchmark difference"
+            value={formatSignedNumber(item.benchmarkDifference)}
+            hint="Benchmark price − Flipkart display our price"
+          />
+          <Figure
+            label="Benchmark price"
+            value={formatPrice(item.benchmarkPrice)}
+            hint="From the listing sheet"
+          />
+        </section>
+
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Figure
+            label="Current bank settlement"
+            value={formatSettlement(item.currentSettlement)}
+            hint="From the listing sheet"
+          />
+          <Figure
+            label="Minimum bank settlement"
+            value={formatSettlement(item.minSettlement)}
+            hint="From the settlement sheet"
+          />
+          <Figure
+            label="Fees"
+            value={formatSettlement(item.fees)}
+            hint="Your listing price − current bank settlement"
+          />
+        </section>
+
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Figure
             label="Expected listing price"
-            value={formatPrice(expectedListingPrice(item))}
-            tone={priceDifference(item) === null ? 'muted' : 'success'}
-            hint="Current listing price + change"
+            value={item.expectedListingPrice === null ? '—' : formatPrice(item.expectedListingPrice)}
+            tone={item.expectedListingPrice === null ? 'muted' : 'success'}
+            hint={item.expectedListingPrice === null ? 'This tab defines no expected price' : undefined}
           />
           <Figure
             label="Expected bank settlement"
-            value={formatSettlement(expectedBankSettlement(item))}
-            tone={priceDifference(item) === null ? 'muted' : 'success'}
-            hint="Current bank settlement + change"
-          />
-        </section>
-
-        <section className="grid gap-3 sm:grid-cols-3">
-          <Figure label="Current bank settlement" value={formatSettlement(item.currentSettlement)} />
-          <Figure label="Minimum bank settlement" value={formatSettlement(item.minSettlement)} />
-          <Figure
-            label="Settlement at recommended price"
-            value={item.recommendedPrice === null ? 'No change' : formatSettlement(item.projectedSettlement)}
-            tone={
-              item.projectedSettlement === null || item.minSettlement === null
-                ? 'default'
-                : item.projectedSettlement >= item.minSettlement
-                  ? 'success'
-                  : 'failed'
-            }
-            hint={
-              item.recommendedPrice === null
-                ? undefined
-                : `${formatPrice(item.recommendedPrice)}${
-                    item.priceDelta === null ? '' : ` · ${formatSignedNumber(item.priceDelta)} vs Flipkart displayed`
-                  }`
-            }
-          />
-        </section>
-
-        <section className="grid gap-3 sm:grid-cols-3">
-          <Figure
-            label="Benchmark price"
-            value={item.benchmarkPrice ? formatPrice(item.benchmarkPrice) : 'None published'}
-            tone={item.benchmarkStatus === 'BENCHMARK_USABLE' ? 'default' : 'muted'}
-            hint={BENCHMARK_STATUS_LABEL[item.benchmarkStatus]}
-          />
-          <Figure
-            label="Minimum acceptable price"
-            value={item.minAcceptablePrice === null ? 'Unprovable' : formatPrice(item.minAcceptablePrice)}
-            tone={item.minAcceptablePrice === null ? 'muted' : 'default'}
-            hint="The price at which the settlement hits its floor"
-          />
-          <Figure
-            label="Buy Box status"
-            value={item.hasBuybox === null ? 'Unknown' : item.hasBuybox ? 'Won' : 'Lost'}
-            tone={item.hasBuybox === null ? 'muted' : item.hasBuybox ? 'success' : 'default'}
-            hint={item.winningSeller ? `Winner: ${item.winningSeller}` : 'No winning seller was read'}
-          />
-        </section>
-
-        <section className="grid gap-3 sm:grid-cols-2">
-          <Figure
-            label="Orders in the last 24h"
             value={
-              item.ordersLast24h === null
-                ? 'No orders report'
-                : `${item.ordersLast24h} unit${item.ordersLast24h === 1 ? '' : 's'}`
+              item.expectedBankSettlement === null ? '—' : formatSettlement(item.expectedBankSettlement)
             }
-            tone={
-              item.ordersLast24h === null ? 'muted' : item.ordersLast24h > 0 ? 'success' : 'failed'
-            }
+            tone={item.expectedBankSettlement === null ? 'muted' : 'success'}
             hint={
-              item.historicalUnitsPerDay === null
-                ? 'Upload the Flipkart orders report to measure conversion'
-                : `Normally ${item.historicalUnitsPerDay.toFixed(2)} units/day`
+              item.expectedBankSettlement === null ? 'This tab defines no expected settlement' : undefined
             }
           />
-          <Figure label="Rule applied" value={RULE_LABEL[item.rule]} small />
+          <Figure
+            label="Buy Box won"
+            value={item.hasBuybox === null ? 'Unknown' : item.hasBuybox ? 'Yes' : 'No'}
+            tone={item.hasBuybox === null ? 'muted' : item.hasBuybox ? 'success' : 'default'}
+            hint={item.winnerSeller ? `Winner seller: ${item.winnerSeller}` : 'No winner seller was read'}
+          />
         </section>
 
-        {item.demand && (
-          <section className="rounded-lg border bg-muted/40 p-3">
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Zero-order evidence
-            </h3>
-            <p className="mt-1.5 text-sm">
-              At {item.demand.unitsPerDay.toFixed(2)} units/day, a full day with no orders would
-              happen {(item.demand.zeroProbability * 100).toFixed(1)}% of the time by chance alone.
-              Across {item.demand.observedDays.toFixed(1)} days of orders that makes this a{' '}
-              <span className="font-medium">{item.demand.signal}</span> signal —{' '}
-              {Math.round(item.demand.confidence * 100)}% confidence.
-              {item.demand.damped &&
-                ' Stepped down one band because the price is already at or under the benchmark.'}
-            </p>
-          </section>
-        )}
-
-        <section className="rounded-lg border bg-muted/40 p-3">
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Recommendation reason
-          </h3>
-          <p className="mt-1.5 text-sm">{item.reason}</p>
-          {item.appliedRules.length > 1 && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {item.appliedRules.map((rule) => (
-                <Badge key={rule} variant="outline" className="text-[11px] font-normal">
-                  {RULE_LABEL[rule]}
-                </Badge>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="space-y-2">
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Historical summary
-          </h3>
-
-          {item.history.uploads === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No previous upload for this account contained this FSN — the recommendation uses only
-              this upload&apos;s data.
-            </p>
-          ) : (
-            <>
-              <p className="text-sm text-muted-foreground">
-                Seen in {item.history.uploads} previous upload{item.history.uploads === 1 ? '' : 's'},
-                winning the Buy Box {item.history.buyboxWins} time
-                {item.history.buyboxWins === 1 ? '' : 's'}
-                {item.history.repeatedWinningPrice !== null &&
-                  ` · ${formatPrice(item.history.repeatedWinningPrice)} won ${item.history.repeatedWinningPriceCount} times`}
-                {item.history.lastFiveWithoutBuybox && ' · no Buy Box in the last five uploads'}
-                .
-              </p>
-
-              <div className="overflow-hidden rounded-lg border">
-                <table className="w-full caption-bottom text-sm">
-                  <thead className="border-b bg-muted">
-                    <tr>
-                      {['Upload', 'When', 'My price', 'Winner price', 'Buy Box'].map((header, index) => (
-                        <th
-                          key={header}
-                          className={cn(
-                            'h-9 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground',
-                            index >= 2 && 'text-right',
-                          )}
-                        >
-                          {header}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {item.history.entries.map((entry) => (
-                      <tr key={entry.jobId} className="border-b last:border-0">
-                        <td className="max-w-[12rem] truncate px-3 py-1.5" title={entry.jobName}>
-                          {entry.jobName}
-                        </td>
-                        <td className="tabular px-3 py-1.5 text-xs text-muted-foreground">
-                          {formatDateTime(entry.uploadTime)}
-                        </td>
-                        <td className="tabular px-3 py-1.5 text-right">{formatPrice(entry.myPrice)}</td>
-                        <td className="tabular px-3 py-1.5 text-right">{formatPrice(entry.winnerPrice)}</td>
-                        <td className="px-3 py-1.5 text-right">
-                          {entry.hasBuybox === null ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : entry.hasBuybox ? (
-                            <span className="font-medium text-status-success">Won</span>
-                          ) : (
-                            <span className="text-muted-foreground">Lost</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
+        <section className="grid gap-3 sm:grid-cols-3">
+          <Figure
+            label="Orders count (last 24h)"
+            value={
+              item.orderCount === null
+                ? 'No orders report'
+                : `${item.orderCount} unit${item.orderCount === 1 ? '' : 's'}`
+            }
+            tone={item.orderCount === null ? 'muted' : item.orderCount > 0 ? 'success' : 'failed'}
+            hint="From the orders sheet"
+          />
+          <Figure
+            label="Sellers in this listing"
+            value={item.sellerCount === null ? 'Unknown' : String(item.sellerCount)}
+            tone={item.sellerCount === null ? 'muted' : 'default'}
+            hint="Counted by the scrape, ours included"
+          />
+          <Figure
+            label="Scrape status"
+            value={item.scrapeStatus ?? 'Not scraped'}
+            tone={item.scrapeFailed ? 'failed' : 'success'}
+            hint={item.scrapeMessage ?? undefined}
+            small
+          />
         </section>
 
         <div className="flex justify-end">

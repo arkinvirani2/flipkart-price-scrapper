@@ -72,11 +72,16 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
  */
 export interface RecommendationCounts {
   total: number;
-  priceChange: number;
+  priceChangeDiff: number;
+  priceChangeBenchmark: number;
   alreadyCorrect: number;
   settlementUnsafe: number;
-  buyboxWon: number;
+  buyboxWonGetOrder: number;
+  buyboxWonNoOrderMultiSeller: number;
+  buyboxWonNoOrderSingleSeller: number;
   needsReview: number;
+  /** Records no tab's filter claimed. They appear on no tab; see lib/recommendation. */
+  unclassified: number;
 }
 
 /**

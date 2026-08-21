@@ -9,15 +9,7 @@
 
 // Type-only, so exceljs itself is still loaded lazily by the two writers below.
 import type { Workbook } from 'exceljs';
-import {
-  currentListingPrice,
-  expectedBankSettlement,
-  expectedListingPrice,
-  expectedListingPriceAtRecommendation,
-  priceDifference,
-  RULE_LABEL,
-  type Recommendation,
-} from '@/lib/recommendation';
+import type { Recommendation } from '@/lib/recommendation';
 import { computeSettlement, SETTLEMENT_CATEGORY_LABEL, sellerListingUrl } from '@/lib/settlement';
 import type { JobManifest, JobRow } from '@/types/dashboard';
 
@@ -232,60 +224,30 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
 /**
  * The recommendation export.
  *
- * Only the Price Change list is ever exported — it is the actionable one, and a
- * sheet that also carried the rows needing no change would be a to-do list with
- * the work already hidden in it. The columns mirror the detail modal, so what
- * the user saw on screen is what lands in the file.
+ * Only the first tab — Price change (Diff) — is exported. It is the actionable
+ * list, and its columns are the ones the tab itself shows, so what the user saw
+ * on screen is what lands in the file.
  */
 const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
   { header: 'Index', width: 8, value: (item) => item.index + 1 },
   { header: 'SKU', width: 18, value: (item) => item.sku },
   { header: 'FSN', width: 20, value: (item) => item.fsn },
-  { header: 'Account', width: 20, value: (item) => item.accountName },
+  { header: 'Seller', width: 20, value: (item) => item.seller },
   {
-    header: 'Flipkart Displayed Our Listing Price',
-    width: 34,
-    value: (item) => item.currentPrice,
+    header: 'Buy Box Won',
+    width: 12,
+    value: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'Yes' : 'No'),
   },
-  { header: 'Current Listing Price', width: 20, value: (item) => currentListingPrice(item) },
+  { header: 'Current Listing Price', width: 20, value: (item) => item.listingPrice },
+  { header: 'Flipkart Display Our Price', width: 26, value: (item) => item.flipkartDisplayPrice },
   { header: 'Winner Price', width: 14, value: (item) => item.winnerPrice },
-  { header: 'Winning Seller', width: 22, value: (item) => item.winningSeller },
   { header: 'Benchmark Price', width: 16, value: (item) => item.benchmarkPrice },
-  { header: 'Minimum Acceptable Price', width: 23, value: (item) => round2(item.minAcceptablePrice) },
-  // Difference, then the two figures derived from it by addition. Kept next to
-  // each other so the sheet shows the sum, not just its result.
-  { header: 'Difference', width: 13, value: (item) => round2(priceDifference(item)) },
-  { header: 'Expected Listing Price', width: 21, value: (item) => expectedListingPrice(item) },
-  { header: 'Expected Bank Settlement', width: 24, value: (item) => round2(expectedBankSettlement(item)) },
-  // The price to set, and its own move away from the Flipkart displayed price.
-  // On a Buy Box row priced off the benchmark these are the only two columns
-  // that describe the recommendation — the winner-based Difference above is zero
-  // there, because on those rows the winner is us.
-  { header: 'Recommended Price', width: 18, value: (item) => item.recommendedPrice },
-  { header: 'Price Change', width: 14, value: (item) => item.priceDelta },
-  {
-    header: 'Expected Listing Price At Recommendation',
-    width: 38,
-    value: (item) => expectedListingPriceAtRecommendation(item),
-  },
-  { header: 'Current Settlement', width: 18, value: (item) => round2(item.currentSettlement) },
-  { header: 'Minimum Settlement', width: 19, value: (item) => round2(item.minSettlement) },
-  { header: 'Settlement At Recommended Price', width: 30, value: (item) => round2(item.projectedSettlement) },
-  {
-    header: 'Buybox',
-    width: 10,
-    value: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'YES' : 'NO'),
-  },
-  { header: 'Orders Last 24H', width: 16, value: (item) => item.ordersLast24h },
-  { header: 'Normal Units Per Day', width: 20, value: (item) => round2(item.historicalUnitsPerDay) },
-  { header: 'Demand Signal', width: 14, value: (item) => item.demand?.signal ?? null },
-  { header: 'Confidence %', width: 13, value: (item) => Math.round(item.confidence * 100) },
-  { header: 'Reason Code', width: 22, value: (item) => item.reasonCode },
-  { header: 'Benchmark Status', width: 20, value: (item) => item.benchmarkStatus },
-  { header: 'Rule Applied', width: 42, value: (item) => RULE_LABEL[item.rule] },
-  { header: 'Reason', width: 60, value: (item) => item.reason },
-  { header: 'Previous Uploads', width: 17, value: (item) => item.history.uploads },
-  { header: 'Buy Box Wins', width: 14, value: (item) => item.history.buyboxWins },
+  { header: 'Change', width: 12, value: (item) => round2(item.difference) },
+  { header: 'Expected Listing Price', width: 22, value: (item) => round2(item.expectedListingPrice) },
+  { header: 'Expected Bank Settlement', width: 24, value: (item) => round2(item.expectedBankSettlement) },
+  { header: 'Minimum Bank Settlement', width: 24, value: (item) => round2(item.minSettlement) },
+  { header: 'Winner Seller', width: 22, value: (item) => item.winnerSeller },
+  { header: 'Orders Count (24h)', width: 18, value: (item) => item.orderCount },
   { header: 'Product URL', width: 60, value: (item) => item.productUrl },
   { header: 'Seller Link', width: 60, value: (item) => (item.fsn ? sellerListingUrl(item.fsn) : null) },
 ];
@@ -305,7 +267,7 @@ export async function recommendationXlsxBuffer(
   workbook.creator = 'Flipkart Scraper Dashboard';
   workbook.created = new Date(manifest.createdAt);
 
-  addSheet(workbook, 'Price Change', RECOMMENDATION_COLUMNS, rows);
+  addSheet(workbook, 'Price change (Diff)', RECOMMENDATION_COLUMNS, rows);
 
   const summary = workbook.addWorksheet('Summary');
   summary.columns = [
@@ -319,7 +281,7 @@ export async function recommendationXlsxBuffer(
     ['Job ID', manifest.id],
     ['Upload time', meta.uploadTime],
     ['Recommendations generated', meta.generatedAt],
-    ['Price changes exported', rows.length],
+    ['Rows exported', rows.length],
     ['Overall', meta.summary],
   ]);
 

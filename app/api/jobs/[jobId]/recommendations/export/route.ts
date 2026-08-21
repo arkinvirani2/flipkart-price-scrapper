@@ -1,9 +1,9 @@
 /**
  * GET /api/jobs/:jobId/recommendations/export?format=csv|xlsx
  *
- * Exports the Price Change list and nothing else — the other three tabs are
- * outcomes, not work. An optional `search` narrows it to what the user had on
- * screen, so the file matches the table it was downloaded from.
+ * Exports the first tab — Price change (Diff) — and nothing else. An optional
+ * `search` narrows it to what the user had on screen, so the file matches the
+ * table it was downloaded from.
  */
 
 import { NextResponse } from 'next/server';
@@ -22,7 +22,7 @@ export const dynamic = 'force-dynamic';
 type Context = { params: Promise<{ jobId: string }> };
 
 function matchesSearch(item: Recommendation, needle: string): boolean {
-  return [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName, item.reasonCode]
+  return [item.sku, item.fsn, item.winnerSeller, item.seller]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
@@ -41,7 +41,7 @@ export async function GET(request: Request, { params }: Context) {
   const format = (url.searchParams.get('format') ?? 'xlsx').toLowerCase();
   const search = url.searchParams.get('search')?.trim().toLowerCase();
 
-  let rows = file.recommendations.filter((item) => item.category === 'priceChange');
+  let rows = file.recommendations.filter((item) => item.category === 'priceChangeDiff');
   if (search) rows = rows.filter((item) => matchesSearch(item, search));
 
   if (format === 'csv') {

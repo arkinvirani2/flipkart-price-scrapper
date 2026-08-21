@@ -9,7 +9,11 @@
  * equal terms, and "which rule is best for this FSN" becomes arithmetic.
  */
 
-import { summarizeHistory, staticRuleTarget, type RecommendationHistorySummary } from '@/lib/recommendation';
+import {
+  summarizeHistory,
+  staticRuleTarget,
+  type RecommendationHistorySummary,
+} from './legacyRules';
 import { evaluateFormula } from './formulas';
 import type { GeneratedFormula, Observation, Series } from './types';
 

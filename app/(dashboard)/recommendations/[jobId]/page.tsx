@@ -1,30 +1,13 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  ArrowLeft,
-  CheckCircle2,
-  CircleHelp,
-  Download,
-  FileSpreadsheet,
-  Loader2,
-  Package,
-  RefreshCw,
-  ShieldAlert,
-  Tag,
-  Trophy,
-} from 'lucide-react';
+import { ArrowLeft, Download, FileSpreadsheet, Loader2, Package, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import {
-  ALREADY_CORRECT_COLUMNS,
-  BUYBOX_NO_ORDERS_COLUMNS,
-  BUYBOX_WON_COLUMNS,
-  NEEDS_REVIEW_COLUMNS,
-  PRICE_CHANGE_COLUMNS,
   RecommendationTable,
-  SETTLEMENT_UNSAFE_COLUMNS,
+  TAB_COLUMNS,
 } from '@/components/recommendations/RecommendationTable';
 import { RecommendationDetailDialog } from '@/components/recommendations/RecommendationDetailDialog';
 import { StatCard } from '@/components/dashboard/StatCard';
@@ -36,16 +19,28 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
-import type { Recommendation } from '@/lib/recommendation';
+import {
+  CATEGORY_ORDER,
+  RECOMMENDATION_CATEGORY_LABEL,
+  type Recommendation,
+  type RecommendationCategory,
+} from '@/lib/recommendation';
 
 /**
  * The recommendation page for one upload.
  *
- * It reads the recommendations saved in the job folder and never recomputes
- * them on the way in — opening last Tuesday's upload shows the decision that was
- * made last Tuesday, against the history as it stood then. Regenerating is a
+ * The eight tabs are listed straight off `CATEGORY_ORDER`, in the order the
+ * classification applies them, and each one shows only the records whose
+ * category is its own. Because the classification already assigned every record
+ * to at most one tab, nothing here can duplicate a row across two of them.
+ *
+ * The saved file is read as-is and never recomputed on the way in — opening last
+ * Tuesday's upload shows the classification made last Tuesday. Regenerating is a
  * button, because that is a different thing from looking.
  */
+
+/** The first tab is the actionable one, and the only one that exports. */
+const EXPORTING_TAB: RecommendationCategory = 'priceChangeDiff';
 
 export default function RecommendationsPage() {
   const params = useParams<{ jobId: string }>();
@@ -70,40 +65,16 @@ export default function RecommendationsPage() {
 
   const file = query.data?.recommendations;
 
+  /** One list per tab, filled by the category the classification already set. */
   const buckets = useMemo(() => {
-    const empty = {
-      priceChange: [] as Recommendation[],
-      alreadyCorrect: [] as Recommendation[],
-      settlementUnsafe: [] as Recommendation[],
-      buyboxWon: [] as Recommendation[],
-      needsReview: [] as Recommendation[],
-    };
-    for (const item of file?.recommendations ?? []) empty[item.category].push(item);
-    return empty;
-  }, [file]);
+    const empty = Object.fromEntries(
+      CATEGORY_ORDER.map((category) => [category, [] as Recommendation[]]),
+    ) as Record<RecommendationCategory, Recommendation[]>;
 
-  /**
-   * The Buy Box lists, split by whether the product actually sold.
-   *
-   * Two different scenarios wearing one label: holding the Buy Box on something
-   * that is selling is a result, holding it on something nobody bought is a
-   * question. Purely a presentation split — the same rows, the same rules,
-   * sorted by the 24h order count the rules already recorded.
-   *
-   * Selected on `hasBuybox` rather than out of the buyboxWon bucket, because a
-   * Buy Box row that came back with a recommended price is filed under Price
-   * change — that is what makes it actionable and exportable — and it would
-   * otherwise be missing from the very list that explains why it has one. So a
-   * priced row appears in both, answering a different question in each. Rows from
-   * a batch with no orders report have no count at all, and sit with the ones
-   * that sold nothing because that is the list you go looking for them in.
-   */
-  const buybox = useMemo(() => {
-    const won = (file?.recommendations ?? []).filter((item) => item.hasBuybox === true);
-    return {
-      selling: won.filter((item) => (item.ordersLast24h ?? 0) > 0),
-      noOrders: won.filter((item) => (item.ordersLast24h ?? 0) <= 0),
-    };
+    for (const item of file?.recommendations ?? []) {
+      if (item.category !== null) empty[item.category].push(item);
+    }
+    return empty;
   }, [file]);
 
   if (query.isLoading) {
@@ -169,8 +140,8 @@ export default function RecommendationsPage() {
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              Re-runs the rules against this account&apos;s history as it stands now, and overwrites
-              the saved recommendations for this upload.
+              Re-runs the eight filters against this upload&apos;s data as it stands now, and
+              overwrites the saved result.
             </TooltipContent>
           </Tooltip>
         </div>
@@ -183,14 +154,11 @@ export default function RecommendationsPage() {
         </Alert>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         <Card className="p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Account</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Seller</p>
           <p className="mt-2 truncate text-lg font-semibold leading-tight" title={file.accountName}>
             {file.accountName || '—'}
-          </p>
-          <p className="mt-1.5 truncate text-xs text-muted-foreground">
-            {file.historyJobs} previous upload{file.historyJobs === 1 ? '' : 's'} used as history
           </p>
         </Card>
 
@@ -214,163 +182,55 @@ export default function RecommendationsPage() {
               ? `${file.ordersWindow.units.toLocaleString('en-IN')} units to ${formatDateTime(
                   file.ordersWindow.end,
                 )}`
-              : 'No orders report — Buy Box rows were left alone'}
+              : 'No orders report — the order count is unknown'}
           </p>
         </Card>
 
         <StatCard label="Total SKU" value={counts.total} icon={Package} />
-        <StatCard label="Price change required" value={counts.priceChange} icon={Tag} tone="running" />
-        <StatCard label="Already correct" value={counts.alreadyCorrect} icon={CheckCircle2} tone="success" />
-        <StatCard label="Settlement unsafe" value={counts.settlementUnsafe} icon={ShieldAlert} tone="failed" />
-        <StatCard label="Buy Box won" value={counts.buyboxWon} icon={Trophy} tone="success" />
       </div>
 
-      {counts.needsReview > 0 && (
-        <Alert variant="warning">
-          <CircleHelp />
-          <AlertTitle>
-            {counts.needsReview} SKU{counts.needsReview === 1 ? '' : 's'} could not be evaluated
-          </AlertTitle>
-          <AlertDescription>
-            They were never scraped, failed, or came back without prices, so no rule could be applied.
-            They are listed in the Needs review tab.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <Tabs defaultValue="priceChange" className="space-y-3">
-        <TabsList>
-          <TabsTrigger value="priceChange">
-            <Tag className="mr-1.5 size-4" />
-            Price change
-            <CountBadge value={counts.priceChange} />
-          </TabsTrigger>
-          <TabsTrigger value="alreadyCorrect">
-            <CheckCircle2 className="mr-1.5 size-4" />
-            Already correct
-            <CountBadge value={counts.alreadyCorrect} />
-          </TabsTrigger>
-          <TabsTrigger value="settlementUnsafe">
-            <ShieldAlert className="mr-1.5 size-4" />
-            Settlement unsafe
-            <CountBadge value={counts.settlementUnsafe} />
-          </TabsTrigger>
-          <TabsTrigger value="buyboxSelling">
-            <Trophy className="mr-1.5 size-4" />
-            Buy Box won — selling
-            <CountBadge value={buybox.selling.length} />
-          </TabsTrigger>
-          <TabsTrigger value="buyboxNoOrders">
-            <Trophy className="mr-1.5 size-4" />
-            Buy Box won — no orders
-            <CountBadge value={buybox.noOrders.length} />
-          </TabsTrigger>
-          {counts.needsReview > 0 && (
-            <TabsTrigger value="needsReview">
-              <CircleHelp className="mr-1.5 size-4" />
-              Needs review
-              <CountBadge value={counts.needsReview} />
+      <Tabs defaultValue={CATEGORY_ORDER[0]} className="space-y-3">
+        {/* Eight tabs with full labels will not fit one line on most screens, so
+            the list wraps. `h-auto` is the point of this override: TabsList is
+            a fixed h-9 by default, and a wrapped second row inside a fixed
+            height overflows the box and lands on the search field below. */}
+        <TabsList className="h-auto flex-wrap justify-start gap-1">
+          {CATEGORY_ORDER.map((category, position) => (
+            <TabsTrigger key={category} value={category}>
+              <span className="mr-1.5 text-muted-foreground">{position + 1}.</span>
+              {RECOMMENDATION_CATEGORY_LABEL[category]}
+              <CountBadge value={buckets[category].length} />
             </TabsTrigger>
-          )}
+          ))}
         </TabsList>
 
-        <TabsContent value="priceChange" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            The actionable list: a lower price that wins the Buy Box and still settles above the
-            minimum, or a higher one where the winner is dearer than us and the margin is going
-            unclaimed. This is the only tab that exports.
-          </p>
-          <RecommendationTable
-            rows={buckets.priceChange}
-            columns={PRICE_CHANGE_COLUMNS}
-            emptyMessage="No price changes are recommended for this upload."
-            onView={setDetail}
-            onSearchChange={setSearch}
-            actions={
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" asChild>
-                  <a href={exportHref('csv')} download>
-                    <Download /> CSV
-                  </a>
-                </Button>
-                <Button variant="outline" size="sm" asChild>
-                  <a href={exportHref('xlsx')} download>
-                    <FileSpreadsheet /> XLSX
-                  </a>
-                </Button>
-              </div>
-            }
-          />
-        </TabsContent>
-
-        <TabsContent value="alreadyCorrect" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            Already at the winner price, with the Buy Box going elsewhere — the Change is zero and
-            there is nothing to edit.
-          </p>
-          <RecommendationTable
-            rows={buckets.alreadyCorrect}
-            columns={ALREADY_CORRECT_COLUMNS}
-            emptyMessage="No SKUs are already at the right price."
-            onView={setDetail}
-          />
-        </TabsContent>
-
-        <TabsContent value="settlementUnsafe" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            Matching the winner would push the settlement below the minimum, so no price is recommended
-            — plus the rows where we hold the Buy Box but the bank-settlement values are missing, which
-            show what the normal calculation would have recommended for checking by hand.
-          </p>
-          <RecommendationTable
-            rows={buckets.settlementUnsafe}
-            columns={SETTLEMENT_UNSAFE_COLUMNS}
-            emptyMessage="Every recommendation stayed above its minimum settlement."
-            onView={setDetail}
-          />
-        </TabsContent>
-
-        <TabsContent value="buyboxSelling" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            We hold the Buy Box and the product sold in the last 24 hours — the price is working, so
-            leave it alone.
-          </p>
-          <RecommendationTable
-            rows={buybox.selling}
-            columns={BUYBOX_WON_COLUMNS}
-            emptyMessage="No Buy Box win sold anything in the last 24 hours."
-            onView={setDetail}
-          />
-        </TabsContent>
-
-        <TabsContent value="buyboxNoOrders" className="mt-0 space-y-2">
-          <p className="text-xs text-muted-foreground">
-            We hold the Buy Box but nothing sold in the last 24 hours. The benchmark is checked
-            first: where it still clears the minimum bank settlement once fees come off, it is the
-            recommended price; where it does not, the zero-order rules decide. Every figure here is
-            measured from the recommended price, because on these rows the winner is us.
-          </p>
-          <RecommendationTable
-            rows={buybox.noOrders}
-            columns={BUYBOX_NO_ORDERS_COLUMNS}
-            emptyMessage="Every Buy Box win sold at least one unit."
-            onView={setDetail}
-          />
-        </TabsContent>
-
-        {counts.needsReview > 0 && (
-          <TabsContent value="needsReview" className="mt-0 space-y-2">
-            <p className="text-xs text-muted-foreground">
-              No rule could be applied — the reason is on each row.
-            </p>
+        {CATEGORY_ORDER.map((category) => (
+          <TabsContent key={category} value={category} className="mt-0 space-y-2">
             <RecommendationTable
-              rows={buckets.needsReview}
-              columns={NEEDS_REVIEW_COLUMNS}
-              emptyMessage="Every SKU could be evaluated."
+              rows={buckets[category]}
+              columns={TAB_COLUMNS[category]}
+              emptyMessage="No records fell into this tab."
               onView={setDetail}
+              onSearchChange={category === EXPORTING_TAB ? setSearch : undefined}
+              actions={
+                category === EXPORTING_TAB ? (
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" asChild>
+                      <a href={exportHref('csv')} download>
+                        <Download /> CSV
+                      </a>
+                    </Button>
+                    <Button variant="outline" size="sm" asChild>
+                      <a href={exportHref('xlsx')} download>
+                        <FileSpreadsheet /> XLSX
+                      </a>
+                    </Button>
+                  </div>
+                ) : undefined
+              }
             />
           </TabsContent>
-        )}
+        ))}
       </Tabs>
 
       <RecommendationDetailDialog item={detail} onOpenChange={(open) => !open && setDetail(null)} />

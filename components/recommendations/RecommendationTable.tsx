@@ -12,30 +12,21 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { formatPrice, formatSettlement, formatSignedNumber } from '@/lib/format';
-import {
-  currentListingPrice,
-  expectedBankSettlement,
-  expectedListingPrice,
-  expectedListingPriceAtRecommendation,
-  priceDifference,
-  settlementUnsafeTarget,
-  RULE_LABEL,
-  type Recommendation,
-} from '@/lib/recommendation';
+import type { Recommendation, RecommendationCategory } from '@/lib/recommendation';
 import { sellerListingUrl } from '@/lib/settlement';
 import { cn } from '@/lib/utils';
 
 /**
- * The recommendation list for one tab.
+ * The record list for one tab.
  *
- * Paginated rather than virtualized, unlike the queue: a recommendation list is
- * something you work through in order and tick off, so a page number is a more
- * useful position than a scroll offset. Search, sort and page size all live in
- * this component's own state, so switching tabs starts each list clean.
+ * Paginated rather than virtualized, unlike the queue: this is a list you work
+ * through in order and tick off, so a page number is a more useful position than
+ * a scroll offset. Search, sort and page size all live in this component's own
+ * state, so switching tabs starts each list clean.
  *
  * As in the settlement table, clicking a row opens that product's Flipkart
  * Seller Hub listing in a new tab, so the price can be changed where it is
- * recommended. The View button stays a separate action for the detail dialog.
+ * shown. The View button stays a separate action for the detail dialog.
  */
 
 type SortDirection = 'asc' | 'desc';
@@ -51,14 +42,27 @@ interface SortableColumn {
 
 const PAGE_SIZES = [25, 50, 100, 250];
 
+/* ------------------------------------------------------------- the columns */
+
+const FSN: SortableColumn = {
+  key: 'fsn',
+  header: 'FSN',
+  sortValue: (item) => item.fsn,
+  cell: (item) => (
+    <span className="block truncate font-medium" title={item.fsn}>
+      {item.fsn}
+    </span>
+  ),
+};
+
 /**
- * Do we hold the Buy Box on this listing?
+ * Do we hold the Buy Box?
  *
  * Null is not No. It means Flipkart never named a winning seller for the page,
  * so the question was never answered — printing "No" there would invent a loss
  * that was never observed.
  */
-const BUYBOX_COLUMN: SortableColumn = {
+const BUY_BOX_WON: SortableColumn = {
   key: 'hasBuybox',
   header: 'Buy Box won',
   sortValue: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'Yes' : 'No'),
@@ -74,43 +78,30 @@ const BUYBOX_COLUMN: SortableColumn = {
     ),
 };
 
-/**
- * Columns every tab shows.
- *
- * The FSN alone identifies the row — it is what the Seller Hub link is built
- * from and what the user searches by. The SKU is still searchable and still
- * names the detail dialog; it just no longer takes a column.
- */
-const IDENTITY_COLUMNS: SortableColumn[] = [
-  {
-    key: 'fsn',
-    header: 'FSN',
-    sortValue: (item) => item.fsn,
-    cell: (item) => (
-      <span className="block truncate font-medium" title={item.fsn}>
-        {item.fsn}
-      </span>
-    ),
-  },
-  BUYBOX_COLUMN,
-];
-
-/**
- * The price Flipkart shows for *our own* listing, as scraped.
- *
- * Headed by what it is rather than "Current price": the sheet's own current
- * listing price sits in the next column along, and the two are different
- * numbers that must never be read as each other.
- */
-const FLIPKART_DISPLAYED_COLUMN: SortableColumn = {
-  key: 'currentPrice',
-  header: 'Flipkart displayed price',
+/** Sheet 1's "Your Selling Price" — the number the seller actually edits. */
+const CURRENT_LISTING_PRICE: SortableColumn = {
+  key: 'listingPrice',
+  header: 'Current listing price',
   align: 'right',
-  sortValue: (item) => item.currentPrice,
-  cell: (item) => formatPrice(item.currentPrice),
+  sortValue: (item) => item.listingPrice,
+  cell: (item) => formatPrice(item.listingPrice),
 };
 
-const WINNER_PRICE_COLUMN: SortableColumn = {
+/**
+ * The price Flipkart shows a buyer for *our* listing, as scraped.
+ *
+ * Headed by what it is rather than "Current price": the sheet's own listing
+ * price is a different number, and the two must never be read as each other.
+ */
+const FLIPKART_DISPLAY_OUR_PRICE: SortableColumn = {
+  key: 'flipkartDisplayPrice',
+  header: 'Flipkart display our price',
+  align: 'right',
+  sortValue: (item) => item.flipkartDisplayPrice,
+  cell: (item) => formatPrice(item.flipkartDisplayPrice),
+};
+
+const WINNER_PRICE: SortableColumn = {
   key: 'winnerPrice',
   header: 'Winner price',
   align: 'right',
@@ -118,392 +109,221 @@ const WINNER_PRICE_COLUMN: SortableColumn = {
   cell: (item) => formatPrice(item.winnerPrice),
 };
 
-const PRICE_COLUMNS: SortableColumn[] = [FLIPKART_DISPLAYED_COLUMN, WINNER_PRICE_COLUMN];
+const BENCHMARK_PRICE: SortableColumn = {
+  key: 'benchmarkPrice',
+  header: 'Benchmark price',
+  align: 'right',
+  sortValue: (item) => item.benchmarkPrice,
+  cell: (item) => formatPrice(item.benchmarkPrice),
+};
 
-const WINNER_COLUMN: SortableColumn = {
-  key: 'winningSeller',
-  header: 'Winning seller',
-  sortValue: (item) => item.winningSeller,
+/** Winner price − Flipkart display our price. */
+const CHANGE: SortableColumn = {
+  key: 'difference',
+  header: 'Change',
+  align: 'right',
+  sortValue: (item) => item.difference,
+  cell: (item) => <span className="font-medium">{formatSignedNumber(item.difference)}</span>,
+};
+
+/** Benchmark price − Flipkart display our price. */
+const BENCHMARK_DIFFERENCE: SortableColumn = {
+  key: 'benchmarkDifference',
+  header: 'Benchmark difference',
+  align: 'right',
+  sortValue: (item) => item.benchmarkDifference,
+  cell: (item) => <span className="font-medium">{formatSignedNumber(item.benchmarkDifference)}</span>,
+};
+
+const EXPECTED_LISTING_PRICE: SortableColumn = {
+  key: 'expectedListingPrice',
+  header: 'Expected listing price',
+  align: 'right',
+  sortValue: (item) => item.expectedListingPrice,
+  cell: (item) => (
+    <span className="font-semibold text-status-success">{formatPrice(item.expectedListingPrice)}</span>
+  ),
+};
+
+const EXPECTED_BANK_SETTLEMENT: SortableColumn = {
+  key: 'expectedBankSettlement',
+  header: 'Expected bank settlement',
+  align: 'right',
+  sortValue: (item) => item.expectedBankSettlement,
+  cell: (item) => (
+    <span className="font-semibold text-status-success">
+      {formatSettlement(item.expectedBankSettlement)}
+    </span>
+  ),
+};
+
+const MINIMUM_BANK_SETTLEMENT: SortableColumn = {
+  key: 'minSettlement',
+  header: 'Minimum bank settlement',
+  align: 'right',
+  sortValue: (item) => item.minSettlement,
+  cell: (item) => formatSettlement(item.minSettlement),
+};
+
+const WINNER_SELLER: SortableColumn = {
+  key: 'winnerSeller',
+  header: 'Winner seller',
+  sortValue: (item) => item.winnerSeller,
   cell: (item) =>
-    item.winningSeller ? (
-      <span className="block truncate" title={item.winningSeller}>
-        {item.winningSeller}
+    item.winnerSeller ? (
+      <span className="block truncate" title={item.winnerSeller}>
+        {item.winnerSeller}
       </span>
     ) : (
       <span className="text-muted-foreground">—</span>
     ),
 };
 
-/** Flipkart's own competitive read. Zero is "no benchmark", never a price. */
-const BENCHMARK_COLUMN: SortableColumn = {
-  key: 'benchmarkPrice',
-  header: 'Benchmark',
+/** Units ordered for this FSN in the last 24 hours, from sheet 3. */
+const ORDERS_COUNT: SortableColumn = {
+  key: 'orderCount',
+  header: 'Orders count (24h)',
   align: 'right',
-  sortValue: (item) => item.benchmarkPrice,
+  sortValue: (item) => item.orderCount,
   cell: (item) =>
-    item.benchmarkPrice ? (
-      formatPrice(item.benchmarkPrice)
-    ) : (
-      <span className="text-muted-foreground" title="Flipkart published no benchmark for this FSN">
-        —
-      </span>
-    ),
-};
-
-/** Units sold in the last 24 hours, from the orders report. */
-const ORDERS_COLUMN: SortableColumn = {
-  key: 'ordersLast24h',
-  header: '24h orders',
-  align: 'right',
-  sortValue: (item) => item.ordersLast24h,
-  cell: (item) =>
-    item.ordersLast24h === null ? (
+    item.orderCount === null ? (
       <span className="text-muted-foreground" title="No orders report was uploaded with this batch">
         —
       </span>
     ) : (
-      <span className={cn(item.ordersLast24h === 0 && 'font-medium text-status-failed')}>
-        {item.ordersLast24h}
+      <span className={cn(item.orderCount === 0 && 'font-medium text-status-failed')}>
+        {item.orderCount}
       </span>
     ),
 };
 
-/** The zero-order test, and how much weight it carries. */
-const DEMAND_COLUMNS: SortableColumn[] = [
-  ORDERS_COLUMN,
-  {
-    key: 'historicalUnitsPerDay',
-    header: 'Normal / day',
-    align: 'right',
-    sortValue: (item) => item.historicalUnitsPerDay,
-    cell: (item) =>
-      item.historicalUnitsPerDay === null ? (
-        <span className="text-muted-foreground">—</span>
-      ) : (
-        item.historicalUnitsPerDay?.toFixed(2)
-      ),
-  },
-  {
-    key: 'confidence',
-    header: 'Confidence',
-    align: 'right',
-    sortValue: (item) => item.confidence,
-    // Only the Buy Box layer grades itself, so a bare 100% from a deterministic
-    // rule would read as a measurement it never took.
-    cell: (item) =>
-      item.demand ? (
-        `${Math.round(item.confidence * 100)}%`
-      ) : (
-        <span className="text-muted-foreground">—</span>
-      ),
-  },
-];
-
-const REASON_COLUMN: SortableColumn = {
-  key: 'reason',
-  header: 'Reason',
-  sortValue: (item) => item.reason,
+/** Why the scrape produced nothing to judge. The Needs review tab only. */
+const SCRAPE_STATUS: SortableColumn = {
+  key: 'scrapeStatus',
+  header: 'Scrape status',
+  sortValue: (item) => item.scrapeStatus,
   cell: (item) => (
-    <span className="block truncate text-muted-foreground" title={item.reason}>
-      {item.reason}
+    <span
+      className="block truncate text-muted-foreground"
+      title={item.scrapeMessage ?? item.scrapeStatus ?? 'Not scraped'}
+    >
+      {item.scrapeStatus ?? 'Not scraped'}
     </span>
   ),
 };
 
-const SETTLEMENT_COLUMNS: SortableColumn[] = [
-  {
-    key: 'currentSettlement',
-    header: 'Current settlement',
-    align: 'right',
-    sortValue: (item) => item.currentSettlement,
-    cell: (item) => formatSettlement(item.currentSettlement),
-  },
-  {
-    key: 'minSettlement',
-    header: 'Minimum settlement',
-    align: 'right',
-    sortValue: (item) => item.minSettlement,
-    cell: (item) => formatSettlement(item.minSettlement),
-  },
-];
+/**
+ * The columns each tab shows, exactly as its specification lists them.
+ *
+ * Held as one map keyed by category so a tab cannot be given another tab's
+ * columns by accident — the page looks its set up by the same key it filters on.
+ */
+export const TAB_COLUMNS: Record<RecommendationCategory, SortableColumn[]> = {
+  priceChangeDiff: [
+    FSN,
+    BUY_BOX_WON,
+    CURRENT_LISTING_PRICE,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    EXPECTED_LISTING_PRICE,
+    EXPECTED_BANK_SETTLEMENT,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
 
-/** The sheet's own listing price — the number the seller actually edits. */
-const CURRENT_LISTING_PRICE_COLUMN: SortableColumn = {
-  key: 'currentListingPrice',
-  header: 'Current listing price',
-  align: 'right',
-  sortValue: (item) => currentListingPrice(item),
-  cell: (item) => formatPrice(currentListingPrice(item)),
+  priceChangeBenchmark: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    BENCHMARK_DIFFERENCE,
+    EXPECTED_LISTING_PRICE,
+    EXPECTED_BANK_SETTLEMENT,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  alreadyCorrect: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  settlementUnsafe: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    EXPECTED_LISTING_PRICE,
+    EXPECTED_BANK_SETTLEMENT,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  buyboxWonGetOrder: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  buyboxWonNoOrderMultiSeller: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    EXPECTED_LISTING_PRICE,
+    EXPECTED_BANK_SETTLEMENT,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  buyboxWonNoOrderSingleSeller: [
+    FSN,
+    BUY_BOX_WON,
+    FLIPKART_DISPLAY_OUR_PRICE,
+    WINNER_PRICE,
+    BENCHMARK_PRICE,
+    CHANGE,
+    MINIMUM_BANK_SETTLEMENT,
+    WINNER_SELLER,
+    ORDERS_COUNT,
+  ],
+
+  needsReview: [FSN, BUY_BOX_WON, FLIPKART_DISPLAY_OUR_PRICE, WINNER_PRICE, SCRAPE_STATUS],
 };
 
-/**
- * The calculation behind a recommendation, spelled out.
- *
- *     Difference             = winner price − Flipkart displayed price
- *     Expected listing price = current listing price   + difference
- *     Expected bank settlt.  = current bank settlement + difference
- *
- * Shared between the Price change tab and the Already correct tab so a reviewer
- * reads the same figures on both, rather than being shown a conclusion on one
- * and the workings on the other.
- */
-const CALCULATION_COLUMNS: SortableColumn[] = [
-  CURRENT_LISTING_PRICE_COLUMN,
-  FLIPKART_DISPLAYED_COLUMN,
-  WINNER_PRICE_COLUMN,
-  BENCHMARK_COLUMN,
-  {
-    key: 'difference',
-    header: 'Change',
-    align: 'right',
-    sortValue: (item) => priceDifference(item),
-    cell: (item) => <span className="font-medium">{formatSignedNumber(priceDifference(item))}</span>,
-  },
-  {
-    key: 'expectedListingPrice',
-    header: 'Expected listing price',
-    align: 'right',
-    sortValue: (item) => expectedListingPrice(item),
-    cell: (item) => (
-      <span className="font-semibold text-status-success">{formatPrice(expectedListingPrice(item))}</span>
-    ),
-  },
-  {
-    key: 'expectedBankSettlement',
-    header: 'Expected bank settlement',
-    align: 'right',
-    sortValue: (item) => expectedBankSettlement(item),
-    // Same treatment as the expected price beside it: the two "expected" figures
-    // are one pair, read off the same Difference.
-    cell: (item) => (
-      <span className="font-semibold text-status-success">{formatSettlement(expectedBankSettlement(item))}</span>
-    ),
-  },
-  {
-    key: 'minSettlement',
-    header: 'Minimum bank settlement',
-    align: 'right',
-    sortValue: (item) => item.minSettlement,
-    cell: (item) => formatSettlement(item.minSettlement),
-  },
-];
-
-/** Column sets per tab — each one shows the figures that tab is actually about. */
-export const PRICE_CHANGE_COLUMNS: SortableColumn[] = [
-  ...IDENTITY_COLUMNS,
-  ...CALCULATION_COLUMNS,
-  {
-    // The price to actually type into Seller Hub. Usually the winner price, so
-    // the Change beside it explains it — but not always: rules 6, 7, 13 and the
-    // learned predictor all set a price the winner alone does not account for,
-    // and a Buy Box row priced off the benchmark has no winner gap at all.
-    key: 'recommendedPrice',
-    header: 'Recommended price',
-    align: 'right',
-    sortValue: (item) => item.recommendedPrice,
-    cell: (item) => <span className="font-semibold">{formatPrice(item.recommendedPrice)}</span>,
-  },
-  WINNER_COLUMN,
-  {
-    // Not the Expected bank settlement above: that one answers "where does the
-    // Difference put the settlement?", this one answers "where would the price
-    // this tab is recommending put it?" — the figure the minimum-settlement gate
-    // is actually judged on.
-    key: 'projectedSettlement',
-    header: 'Settlement at recommended price',
-    align: 'right',
-    sortValue: (item) => item.projectedSettlement,
-    cell: (item) => formatSettlement(item.projectedSettlement),
-  },
-  ...DEMAND_COLUMNS,
-  {
-    key: 'rule',
-    header: 'Rule',
-    sortValue: (item) => item.rule,
-    cell: (item) => (
-      <span className="block truncate text-xs text-muted-foreground" title={RULE_LABEL[item.rule]}>
-        {RULE_LABEL[item.rule]}
-      </span>
-    ),
-  },
-];
-
-export const ALREADY_CORRECT_COLUMNS: SortableColumn[] = [
-  ...IDENTITY_COLUMNS,
-  ...CALCULATION_COLUMNS,
-  WINNER_COLUMN,
-  ORDERS_COLUMN,
-  REASON_COLUMN,
-];
-
-/**
- * The Settlement unsafe list.
- *
- * The winner price is shown because it is why the row is here, but nothing is
- * derived from it: matching it would settle under the minimum. The Change and
- * both expected figures come from `settlementUnsafeTarget` instead — Flipkart's
- * benchmark where it still clears the minimum settlement once fees come off, and
- * the floor itself where it does not. The Benchmark column sits next to the
- * Change so the substitution can be read off the row.
- */
-export const SETTLEMENT_UNSAFE_COLUMNS: SortableColumn[] = [
-  ...IDENTITY_COLUMNS,
-  CURRENT_LISTING_PRICE_COLUMN,
-  ...PRICE_COLUMNS,
-  WINNER_COLUMN,
-  BENCHMARK_COLUMN,
-  {
-    key: 'settlementUnsafeChange',
-    header: 'Change',
-    align: 'right',
-    sortValue: (item) => settlementUnsafeTarget(item).change,
-    cell: (item) => {
-      const derived = settlementUnsafeTarget(item);
-      return (
-        <span
-          className="font-medium"
-          title={
-            derived.benchmarkUsable
-              ? 'Derived from the benchmark price, which still clears the minimum bank settlement'
-              : 'Derived from the price floor: minimum bank settlement + fees'
-          }
-        >
-          {formatSignedNumber(derived.change)}
-        </span>
-      );
-    },
-  },
-  {
-    key: 'settlementUnsafeExpectedListingPrice',
-    header: 'Expected listing price',
-    align: 'right',
-    sortValue: (item) => settlementUnsafeTarget(item).expectedListingPrice,
-    cell: (item) => formatPrice(settlementUnsafeTarget(item).expectedListingPrice),
-  },
-  {
-    key: 'settlementUnsafeExpectedBankSettlement',
-    header: 'Expected bank settlement',
-    align: 'right',
-    sortValue: (item) => settlementUnsafeTarget(item).expectedBankSettlement,
-    cell: (item) => formatSettlement(settlementUnsafeTarget(item).expectedBankSettlement),
-  },
-  ...SETTLEMENT_COLUMNS,
-  {
-    // The settlement the *winner* price would have produced — the figure that
-    // put this row on this list, kept apart from the expected one above.
-    key: 'projectedSettlement',
-    header: 'Would settle at',
-    align: 'right',
-    sortValue: (item) => item.projectedSettlement,
-    cell: (item) => <span className="text-status-failed">{formatSettlement(item.projectedSettlement)}</span>,
-  },
-  REASON_COLUMN,
-];
-
-export const BUYBOX_WON_COLUMNS: SortableColumn[] = [
-  ...IDENTITY_COLUMNS,
-  ...PRICE_COLUMNS,
-  BENCHMARK_COLUMN,
-  ...DEMAND_COLUMNS,
-  {
-    key: 'buyboxWins',
-    header: 'Past wins',
-    align: 'right',
-    sortValue: (item) => item.history.buyboxWins,
-    cell: (item) =>
-      item.history.uploads === 0 ? (
-        <span className="text-muted-foreground">—</span>
-      ) : (
-        `${item.history.buyboxWins}/${item.history.uploads}`
-      ),
-  },
-  REASON_COLUMN,
-];
-
-/**
- * The Buy Box list for rows that sold nothing.
- *
- * Same shape as the Price change tab, but every derived figure is measured from
- * the recommended price rather than from the winner: we *are* the winner here,
- * so a winner-based Change would read zero on every row. The benchmark sits next
- * to the Change it produced, and the minimum bank settlement next to the
- * settlement that has to clear it.
- */
-export const BUYBOX_NO_ORDERS_COLUMNS: SortableColumn[] = [
-  ...IDENTITY_COLUMNS,
-  CURRENT_LISTING_PRICE_COLUMN,
-  ...PRICE_COLUMNS,
-  BENCHMARK_COLUMN,
-  {
-    key: 'recommendedPrice',
-    header: 'Recommended price',
-    align: 'right',
-    sortValue: (item) => item.recommendedPrice,
-    cell: (item) =>
-      item.recommendedPrice === null ? (
-        <span className="text-muted-foreground">—</span>
-      ) : (
-        <span className="font-semibold">{formatPrice(item.recommendedPrice)}</span>
-      ),
-  },
-  {
-    key: 'priceDelta',
-    header: 'Change',
-    align: 'right',
-    sortValue: (item) => item.priceDelta,
-    cell: (item) => <span className="font-medium">{formatSignedNumber(item.priceDelta)}</span>,
-  },
-  {
-    key: 'expectedListingPriceAtRecommendation',
-    header: 'Expected listing price',
-    align: 'right',
-    sortValue: (item) => expectedListingPriceAtRecommendation(item),
-    cell: (item) => (
-      <span className="font-semibold text-status-success">
-        {formatPrice(expectedListingPriceAtRecommendation(item))}
-      </span>
-    ),
-  },
-  {
-    // Already the settlement the recommended price produces, so it needs no
-    // second derivation: projectedSettlement is currentSettlement + the Change.
-    key: 'projectedSettlement',
-    header: 'Expected bank settlement',
-    align: 'right',
-    sortValue: (item) => item.projectedSettlement,
-    cell: (item) => (
-      <span className="font-semibold text-status-success">{formatSettlement(item.projectedSettlement)}</span>
-    ),
-  },
-  {
-    key: 'minSettlement',
-    header: 'Minimum bank settlement',
-    align: 'right',
-    sortValue: (item) => item.minSettlement,
-    cell: (item) => formatSettlement(item.minSettlement),
-  },
-  ...DEMAND_COLUMNS,
-  {
-    key: 'rule',
-    header: 'Rule',
-    sortValue: (item) => item.rule,
-    cell: (item) => (
-      <span className="block truncate text-xs text-muted-foreground" title={RULE_LABEL[item.rule]}>
-        {RULE_LABEL[item.rule]}
-      </span>
-    ),
-  },
-  REASON_COLUMN,
-];
-
-export const NEEDS_REVIEW_COLUMNS: SortableColumn[] = [...IDENTITY_COLUMNS, ...PRICE_COLUMNS, REASON_COLUMN];
+/* --------------------------------------------------------------- the table */
 
 interface Props {
   rows: Recommendation[];
   columns: SortableColumn[];
   emptyMessage: string;
   onView: (item: Recommendation) => void;
-  /** Rendered next to the search box — the export buttons on the Price Change tab. */
+  /** Rendered next to the search box — the export buttons on the first tab. */
   actions?: React.ReactNode;
   /** Lets the page mirror the search into the export link. */
   onSearchChange?: (value: string) => void;
@@ -527,7 +347,7 @@ export function RecommendationTable({
     if (!needle) return rows;
 
     return rows.filter((item) =>
-      [item.sku, item.fsn, item.winningSeller, item.reason, item.accountName, item.reasonCode]
+      [item.sku, item.fsn, item.winnerSeller, item.seller]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
@@ -588,9 +408,9 @@ export function RecommendationTable({
               setSearch(event.target.value);
               onSearchChange?.(event.target.value);
             }}
-            placeholder="Search SKU, FSN, seller or reason…"
+            placeholder="Search SKU, FSN or seller…"
             className="pl-8"
-            aria-label="Search recommendations"
+            aria-label="Search records"
           />
         </div>
 
