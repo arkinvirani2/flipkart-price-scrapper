@@ -70,19 +70,6 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
  * Stored on the manifest so the dashboard can show an upload's headline figures
  * without opening its recommendations file.
  */
-export interface RecommendationCounts {
-  total: number;
-  priceChangeDiff: number;
-  priceChangeBenchmark: number;
-  alreadyCorrect: number;
-  settlementUnsafe: number;
-  buyboxWonGetOrder: number;
-  buyboxWonNoOrderMultiSeller: number;
-  buyboxWonNoOrderSingleSeller: number;
-  needsReview: number;
-  /** Records no tab's filter claimed. They appear on no tab; see lib/recommendation. */
-  unclassified: number;
-}
 
 /**
  * What the uploaded orders report covered.
@@ -130,7 +117,6 @@ export interface JobManifest {
    */
   ordersWindow?: OrdersWindow;
   /** Filled in once recommendations have been generated for this job. */
-  recommendationCounts?: RecommendationCounts;
   recommendationSummary?: string;
   recommendationsGeneratedAt?: string;
 }
@@ -169,6 +155,8 @@ export interface JobRow {
   stockCount?: number;
   /** The sheet's "Your Listing Price", carried through for the recommendation view. */
   listingPrice?: number;
+  /** Lowest Listing File value for this FSN. */
+  lowestListingFile?: number;
 }
 
 /* ------------------------------------------------------------------- stats */

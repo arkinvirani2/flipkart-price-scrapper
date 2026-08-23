@@ -7,6 +7,8 @@ export interface ScrapeInput {
   targetSeller: string;
   sku: string;
   fsn: string;
+  /** Per-FSN floor from the account's Lowest Listing File column. */
+  lowestListingFile?: number;
   /**
    * Per-product bank-settlement figures used only by the dashboard's settlement
    * view. The scraper reads none of these — they pass through untouched from the
@@ -50,6 +52,8 @@ export interface ScrapeResult {
    * Optional so journals written before this field existed still parse.
    */
   buyboxSellerName?: string | null;
+  /** True when the product page's main seller is the account seller. */
+  mainListingIsAccountSeller?: boolean;
   mainPrice: number | null;
   sellerPrice: number | null;
   /** sellerPrice - mainPrice. Null when either side is missing. */

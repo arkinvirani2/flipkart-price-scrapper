@@ -21,14 +21,6 @@ export const dynamic = 'force-dynamic';
 
 type Context = { params: Promise<{ jobId: string }> };
 
-function matchesSearch(item: Recommendation, needle: string): boolean {
-  return [item.sku, item.fsn, item.winnerSeller, item.seller]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-    .includes(needle);
-}
-
 export async function GET(request: Request, { params }: Context) {
   const { jobId } = await params;
   const record = getJob(jobId);
@@ -39,10 +31,7 @@ export async function GET(request: Request, { params }: Context) {
 
   const url = new URL(request.url);
   const format = (url.searchParams.get('format') ?? 'xlsx').toLowerCase();
-  const search = url.searchParams.get('search')?.trim().toLowerCase();
-
-  let rows = file.recommendations.filter((item) => item.category === 'priceChangeDiff');
-  if (search) rows = rows.filter((item) => matchesSearch(item, search));
+  const rows = file.recommendations;
 
   if (format === 'csv') {
     return new Response(recommendationCsvStream(rows), {
@@ -56,7 +45,6 @@ export async function GET(request: Request, { params }: Context) {
   if (format === 'xlsx') {
     const buffer = await recommendationXlsxBuffer(record.manifest, rows, {
       accountName: file.accountName,
-      uploadTime: file.uploadTime,
       generatedAt: file.generatedAt,
       summary: file.summary,
     });

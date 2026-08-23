@@ -229,27 +229,9 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
  * on screen is what lands in the file.
  */
 const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
-  { header: 'Index', width: 8, value: (item) => item.index + 1 },
-  { header: 'SKU', width: 18, value: (item) => item.sku },
   { header: 'FSN', width: 20, value: (item) => item.fsn },
-  { header: 'Seller', width: 20, value: (item) => item.seller },
-  {
-    header: 'Buy Box Won',
-    width: 12,
-    value: (item) => (item.hasBuybox === null ? null : item.hasBuybox ? 'Yes' : 'No'),
-  },
-  { header: 'Current Listing Price', width: 20, value: (item) => item.listingPrice },
-  { header: 'Flipkart Display Our Price', width: 26, value: (item) => item.flipkartDisplayPrice },
-  { header: 'Winner Price', width: 14, value: (item) => item.winnerPrice },
-  { header: 'Benchmark Price', width: 16, value: (item) => item.benchmarkPrice },
-  { header: 'Change', width: 12, value: (item) => round2(item.difference) },
-  { header: 'Expected Listing Price', width: 22, value: (item) => round2(item.expectedListingPrice) },
-  { header: 'Expected Bank Settlement', width: 24, value: (item) => round2(item.expectedBankSettlement) },
-  { header: 'Minimum Bank Settlement', width: 24, value: (item) => round2(item.minSettlement) },
-  { header: 'Winner Seller', width: 22, value: (item) => item.winnerSeller },
-  { header: 'Orders Count (24h)', width: 18, value: (item) => item.orderCount },
-  { header: 'Product URL', width: 60, value: (item) => item.productUrl },
-  { header: 'Seller Link', width: 60, value: (item) => (item.fsn ? sellerListingUrl(item.fsn) : null) },
+  { header: 'Diff Amount', width: 16, value: (item) => round2(item.diffAmount) },
+  { header: 'Status', width: 28, value: (item) => item.status },
 ];
 
 export function recommendationCsvStream(rows: Recommendation[]): ReadableStream<Uint8Array> {
@@ -259,7 +241,7 @@ export function recommendationCsvStream(rows: Recommendation[]): ReadableStream<
 export async function recommendationXlsxBuffer(
   manifest: JobManifest,
   rows: Recommendation[],
-  meta: { accountName: string; uploadTime: string; generatedAt: string; summary: string },
+  meta: { accountName: string; generatedAt: string; summary: string },
 ): Promise<Buffer> {
   const ExcelJS = await import('exceljs');
   const workbook = new ExcelJS.Workbook();
@@ -267,7 +249,7 @@ export async function recommendationXlsxBuffer(
   workbook.creator = 'Flipkart Scraper Dashboard';
   workbook.created = new Date(manifest.createdAt);
 
-  addSheet(workbook, 'Price change (Diff)', RECOMMENDATION_COLUMNS, rows);
+  addSheet(workbook, 'Recommendations', RECOMMENDATION_COLUMNS, rows);
 
   const summary = workbook.addWorksheet('Summary');
   summary.columns = [
@@ -279,7 +261,6 @@ export async function recommendationXlsxBuffer(
     ['Account', meta.accountName],
     ['Upload', manifest.name],
     ['Job ID', manifest.id],
-    ['Upload time', meta.uploadTime],
     ['Recommendations generated', meta.generatedAt],
     ['Rows exported', rows.length],
     ['Overall', meta.summary],

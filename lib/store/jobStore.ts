@@ -134,6 +134,7 @@ function buildRecord(manifest: JobManifest, inputs: ScrapeInput[], journal: Jour
       benchmarkPrice: input.benchmarkPrice,
       stockCount: input.stockCount,
       listingPrice: input.listingPrice,
+      lowestListingFile: input.lowestListingFile,
     };
   });
 

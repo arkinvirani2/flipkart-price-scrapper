@@ -8,7 +8,7 @@
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { humanBehavior } from './humanBehavior';
-import { comparePrice, pickBuyboxSeller } from './parser';
+import { comparePrice, pickBuyboxSeller, sellerNamesMatch } from './parser';
 import {
   checkAvailability,
   findSellerListEntry,
@@ -243,6 +243,27 @@ async function scrapeInContext(
     const fulfilledBy = await getFulfilledBy(page);
     if (fulfilledBy) log.info(`fulfilled by: ${fulfilledBy}`);
 
+    // When the main listing is already the account's listing there is no seller
+    // comparison to make. Do not open the seller drawer for this product.
+    if (sellerNamesMatch(fulfilledBy, input.targetSeller)) {
+      step('done');
+      return {
+        fsn: input.fsn,
+        sku: input.sku,
+        sellerName: fulfilledBy,
+        buyboxSellerName: fulfilledBy,
+        mainListingIsAccountSeller: true,
+        mainPrice,
+        sellerPrice: mainPrice,
+        difference: null,
+        isPriceDifferent: false,
+        productUrl: input.productUrl,
+        status: 'OK',
+        durationMs: Date.now() - startedAt,
+        attempts: attempt,
+      };
+    }
+
     // 5. Into the seller list.
     step('opening-sellers');
     const entry = await findSellerListEntry(page, jsonLd, input.productUrl);
@@ -355,6 +376,7 @@ function failure(input: ScrapeInput, status: ScrapeStatus, message: string): Scr
     sku: input.sku,
     sellerName: null,
     buyboxSellerName: null,
+    mainListingIsAccountSeller: false,
     mainPrice: null,
     sellerPrice: null,
     difference: null,
