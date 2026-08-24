@@ -45,6 +45,8 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
   assert.equal(computeSettlement(input).finalBankSettlement, 81, 'settlement drops to 81');
   assert.equal(recommendation.status, 'Not Safe');
   assert.notEqual(recommendation.status, 'Safe');
+  // Not Safe recommends no move, so the settlement stays where it is.
+  assert.equal(recommendation.finalBankSettlement, 103);
 }
 
 /* --------------------------------------- Case B — settlement equals threshold */
@@ -63,6 +65,7 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
   const input = priced(150, 130, { currentBankSettlement: 121, bankSettlementThreshold: 100 });
   assert.equal(computeSettlement(input).finalBankSettlement, 101);
   assert.equal(buildRecommendation(input).status, 'Safe');
+  assert.equal(buildRecommendation(input).finalBankSettlement, 101);
   assert.equal(computeSettlement(input).category, 'main');
 }
 
@@ -76,6 +79,7 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
   assert.equal(recommendation.reason, 'No Minimum Bank Settlement for this SKU');
   // The diff is still known and still reported.
   assert.equal(recommendation.diffAmount, -22);
+  assert.equal(recommendation.finalBankSettlement, 103);
 }
 
 /* --------------------------------------------- Case E — unevaluated, never blank */
@@ -100,6 +104,12 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
   assert.equal(noCurrent.status, 'Need Review');
   assert.equal(noCurrent.reason, 'Missing current bank settlement');
 
+  // Need Review recommends nothing, so the settlement is left as it stands.
+  for (const item of [failed, pending, ours, noPrice]) {
+    assert.equal(item.finalBankSettlement, 119, 'Need Review keeps the current bank settlement');
+  }
+  assert.equal(noCurrent.finalBankSettlement, null, 'no current settlement, nothing to keep');
+
   // The whole point: no row anywhere comes back without a status.
   for (const item of [failed, pending, ours, noPrice, noCurrent]) {
     assert.ok(item.status, 'every row carries a status');
@@ -109,14 +119,21 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
 
 /* ------------------------------------------------- preserved existing coverage */
 // We are ₹6 cheaper than the buy box, so the settlement rises: 119 + 6 = 125 > 115.
-assert.deepEqual(buildRecommendation(row({})), { key: 'x', fsn: 'FSN', diffAmount: 6, status: 'Safe', reason: null });
+assert.deepEqual(buildRecommendation(row({})), { key: 'x', fsn: 'FSN', diffAmount: 6, status: 'Safe', finalBankSettlement: 125, reason: null });
 // ₹30 on a ₹100 price is over the 20% band.
-assert.equal(buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 115 })).status, 'Safe but more than 20%');
+{
+  const wide = buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 115 }));
+  assert.equal(wide.status, 'Safe but more than 20%');
+  // The move is capped at 20% of our ₹100 price and keeps the diff's upward
+  // direction: 119 + 20, not the uncapped 119 + 30.
+  assert.equal(wide.finalBankSettlement, 139);
+}
 // A matched price still scores, and reports a zero diff rather than a blank.
 {
   const level = buildRecommendation(priced(150, 150, { currentBankSettlement: 119, bankSettlementThreshold: 115 }));
   assert.equal(level.diffAmount, 0);
   assert.equal(level.status, 'Safe');
+  assert.equal(level.finalBankSettlement, 119);
 }
 // Not Safe outranks the 20% band: breaking the minimum is the more serious call.
 assert.equal(buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 160 })).status, 'Not Safe');

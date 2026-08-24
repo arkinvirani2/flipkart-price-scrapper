@@ -6,7 +6,9 @@ import { jobPaths } from '@/lib/store/paths';
 // 4: diffAmount flipped to the settlement direction (mainPrice − sellerPrice),
 // plus the Threshold Missing / Need Review statuses and their reason. Bumping
 // this discards recommendation files written by the old, wrongly-signed maths.
-export const RECOMMENDATION_SCHEMA = 4;
+// 5: finalBankSettlement added, so files written before the field existed are
+// discarded rather than loaded back without it.
+export const RECOMMENDATION_SCHEMA = 5;
 
 export interface RecommendationFile {
   schema: number;

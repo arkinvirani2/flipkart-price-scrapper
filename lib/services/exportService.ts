@@ -232,6 +232,7 @@ const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
   { header: 'FSN', width: 20, value: (item) => item.fsn },
   { header: 'Diff Amount', width: 16, value: (item) => round2(item.diffAmount) },
   { header: 'Status', width: 28, value: (item) => item.status },
+  { header: 'Final Bank Settlement', width: 22, value: (item) => round2(item.finalBankSettlement) },
   // Why a row is Need Review / Threshold Missing. Empty for rows that were scored.
   { header: 'Reason', width: 40, value: (item) => item.reason },
 ];
