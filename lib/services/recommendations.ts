@@ -3,7 +3,10 @@ import { buildRecommendation, type Recommendation } from '@/lib/recommendation';
 import { getJob, updateManifest } from '@/lib/store/jobStore';
 import { jobPaths } from '@/lib/store/paths';
 
-export const RECOMMENDATION_SCHEMA = 3;
+// 4: diffAmount flipped to the settlement direction (mainPrice − sellerPrice),
+// plus the Threshold Missing / Need Review statuses and their reason. Bumping
+// this discards recommendation files written by the old, wrongly-signed maths.
+export const RECOMMENDATION_SCHEMA = 4;
 
 export interface RecommendationFile {
   schema: number;

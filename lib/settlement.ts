@@ -108,7 +108,9 @@ function categorize(
     return { category: 'review', reason: 'Missing bank-settlement values' };
   }
   // finalBankSettlement is guaranteed non-null once both inputs above exist.
-  const passes = (parts.finalBankSettlement as number) >= parts.bankSettlementThreshold;
+  // Strictly greater, matching the recommendation: a settlement that merely
+  // equals the minimum leaves no headroom and does not pass.
+  const passes = (parts.finalBankSettlement as number) > parts.bankSettlementThreshold;
   
   return { category: passes ? 'main' : 'below', reason: null };
 }
