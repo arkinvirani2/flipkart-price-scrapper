@@ -2,7 +2,7 @@ import { resultKey } from '@/scraper/journal';
 import type { ScrapeInput } from '@/scraper/types';
 
 export interface ValidationIssue {
-  severity: 'error';
+  severity: 'error' | 'warning';
   row: number | null;
   field?: string;
   code: string;
@@ -40,16 +40,22 @@ export function validateUpload(text: string): ValidationReport {
     const productUrl = typeof input.productUrl === 'string' ? input.productUrl.trim() : '';
     const targetSeller = typeof input.targetSeller === 'string' ? input.targetSeller.trim() : '';
     const fsn = typeof input.fsn === 'string' ? input.fsn.trim() : '';
-    const rawLowest = input.lowestListingFile;
-    const lowestListingFile = typeof rawLowest === 'number' ? rawLowest : typeof rawLowest === 'string' ? Number(rawLowest.trim()) : Number.NaN;
-    if (!productUrl || !targetSeller || !fsn || !Number.isFinite(lowestListingFile)) {
-      issues.push({ severity: 'error', row, code: 'FIELD_INVALID', message: 'Flipkart Link, FSN, Lowest Listing File, and account are required.' });
+    const sku = typeof input.sku === 'string' ? input.sku.trim() : '';
+    const currentBankSettlement = toNumber(input.currentBankSettlement);
+    const bankSettlementThreshold = toNumber(input.bankSettlementThreshold);
+    if (!productUrl || !targetSeller || !fsn || !sku || !Number.isFinite(currentBankSettlement)) {
+      issues.push({ severity: 'error', row, code: 'FIELD_INVALID', message: 'SKU Seller ID, FSN, Current Bank Settlement, and account are required.' });
       return;
     }
-    const item: ScrapeInput = { productUrl, targetSeller, fsn, sku: fsn, lowestListingFile };
+    const item: ScrapeInput = { productUrl, targetSeller, fsn, sku, currentBankSettlement };
+    if (Number.isFinite(bankSettlementThreshold)) {
+      item.bankSettlementThreshold = bankSettlementThreshold;
+    } else {
+      issues.push({ severity: 'warning', row, field: 'bankSettlementThreshold', code: 'NO_MINIMUM_SETTLEMENT', message: `No Minimum Bank Settlement for SKU "${sku}" in the second sheet.` });
+    }
     const key = resultKey(item);
     if (seen.has(key)) {
-      issues.push({ severity: 'error', row, code: 'DUPLICATE', message: 'Duplicate Flipkart Link and FSN.' });
+      issues.push({ severity: 'error', row, code: 'DUPLICATE', message: 'Duplicate Flipkart Link and SKU Seller ID.' });
       return;
     }
     seen.add(key);
@@ -58,6 +64,13 @@ export function validateUpload(text: string): ValidationReport {
   return report(rows, issues, parsed.length);
 }
 
+function toNumber(value: unknown): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim() !== '') return Number(value.trim());
+  return Number.NaN;
+}
+
 function report(rows: ScrapeInput[], issues: ValidationIssue[], total: number): ValidationReport {
-  return { ok: issues.length === 0 && rows.length > 0, total, rows, issues, errorCount: issues.length, warningCount: 0 };
+  const errorCount = issues.filter((issue) => issue.severity === 'error').length;
+  return { ok: errorCount === 0 && rows.length > 0, total, rows, issues, errorCount, warningCount: issues.length - errorCount };
 }

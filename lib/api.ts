@@ -131,9 +131,10 @@ export const api = {
 
   analytics: (jobId: string) => request<AnalyticsPayload>(`/api/jobs/${jobId}/analytics`),
 
-  validateUpload: (file: File, targetSeller: string) => {
+  validateUpload: (file: File, minimumFile: File, targetSeller: string) => {
     const form = new FormData();
     form.append('file', file);
+    form.append('minimumFile', minimumFile);
     form.append('targetSeller', targetSeller);
     return request<{ filename: string; report: ValidationReport }>(
       '/api/upload',

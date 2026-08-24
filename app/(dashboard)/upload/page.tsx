@@ -17,11 +17,12 @@ import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
 export default function UploadPage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
+  const [minimumFile, setMinimumFile] = useState<File | null>(null);
   const [account, setAccount] = useState('');
   const [name, setName] = useState('');
   const [report, setReport] = useState<Report | null>(null);
   const validate = useMutation({
-    mutationFn: () => api.validateUpload(file!, account.trim()),
+    mutationFn: () => api.validateUpload(file!, minimumFile!, account.trim()),
     onSuccess: ({ report: next }) => setReport(next),
   });
   const create = useMutation({
@@ -32,8 +33,9 @@ export default function UploadPage() {
   return <div className="w-full space-y-6 p-4 xl:p-5">
     <header><h1 className="text-xl font-semibold">New batch</h1><p className="mt-1 text-sm text-muted-foreground">Add products for one Flipkart account.</p></header>
     <div className="space-y-2"><Label htmlFor="account">Flipkart account</Label><Input id="account" value={account} onChange={(event) => { setAccount(event.target.value); setReport(null); }} placeholder="e.g. Anuttar" /></div>
-    <UploadDropzone onFile={(next) => { setFile(next); setReport(null); if (!name) setName(next.name.replace(/\.(xlsx?|json)$/i, '')); }} disabled={!account.trim() || validate.isPending || create.isPending} filename={file?.name ?? null} title="Drop account product table, or click to browse" description="Exactly: Flipkart Link, FSN, Lowest Listing File" />
-    <Button onClick={() => validate.mutate()} disabled={!file || !account.trim() || validate.isPending}>{validate.isPending ? <Loader2 className="animate-spin" /> : <Play />} Validate table</Button>
+    <UploadDropzone onFile={(next) => { setFile(next); setReport(null); if (!name) setName(next.name.replace(/\.(xlsx?|json)$/i, '')); }} disabled={!account.trim() || validate.isPending || create.isPending} filename={file?.name ?? null} title="Drop listing data (sheet 1), or click to browse" description="Needs: SKU Seller ID, FSN, Current Bank Settlement" />
+    <UploadDropzone onFile={(next) => { setMinimumFile(next); setReport(null); }} disabled={!account.trim() || validate.isPending || create.isPending} filename={minimumFile?.name ?? null} title="Drop minimum bank settlement (sheet 2), or click to browse" description="Needs: SKU, Minimum Bank Settlement price" />
+    <Button onClick={() => validate.mutate()} disabled={!file || !minimumFile || !account.trim() || validate.isPending}>{validate.isPending ? <Loader2 className="animate-spin" /> : <Play />} Validate table</Button>
     {validate.isError && <Alert variant="destructive"><AlertTitle>Upload failed</AlertTitle><AlertDescription>{(validate.error as Error).message}</AlertDescription></Alert>}
     {report && <ValidationReport report={report} />}
     {report?.ok && <div className="space-y-3 rounded-lg border p-4"><Label htmlFor="name">Batch name</Label><Input id="name" value={name} onChange={(event) => setName(event.target.value)} /><Button className="w-full" onClick={() => create.mutate()} disabled={create.isPending}>{create.isPending ? <Loader2 className="animate-spin" /> : <Play />} Create batch</Button></div>}

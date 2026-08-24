@@ -25,7 +25,11 @@ export function buildRecommendation(row: JobRow): Recommendation {
   }
 
   const diffAmount = result.difference;
-  if (row.lowestListingFile !== undefined && result.sellerPrice + diffAmount < row.lowestListingFile) {
+  if (
+    row.currentBankSettlement !== undefined &&
+    row.bankSettlementThreshold !== undefined &&
+    !(row.currentBankSettlement + diffAmount > row.bankSettlementThreshold)
+  ) {
     return { key: row.key, fsn: row.fsn, diffAmount, status: 'Not Safe' };
   }
   if (Math.abs(diffAmount) > result.sellerPrice * 0.2) {
