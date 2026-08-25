@@ -4,6 +4,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { cpus } from 'node:os';
 import type { Page } from 'playwright';
 import type { ResolvedOptions, ScraperOptions } from './types';
 
@@ -104,6 +105,40 @@ export class ScrapeError extends Error {
   }
 }
 
+/* -------------------------------------------------------------- pool sizing */
+
+/** Never narrow the pool below this, however unhappy the numbers look. */
+export const MIN_POOL_WIDTH = 3;
+
+/**
+ * How many products this machine can have in flight before adding more stops
+ * buying throughput.
+ *
+ * A worker is not a thread: it is a browser context whose renderer competes for
+ * the same cores as every other context. Measured on an 8-core box against the
+ * real saved Flipkart markup, 24 products retired by N workers:
+ *
+ *     workers    3      6      8     10     14     20
+ *     rate    1.11   1.60   1.77   1.66   1.77   1.28   products/sec
+ *     each    1.9s   3.8s   4.2s   5.9s   6.6s  15.5s   per product
+ *
+ * Throughput plateaus around the core count and then *falls*: at twenty the box
+ * did less work per second than at three, and each product took eight times
+ * longer. That second row is why a too-wide pool also fails more — every wait in
+ * the scraper is wall-clock, so a product stretched to 15s starts blowing
+ * through timeouts that a 4s product never came near, and a starved wait is
+ * reported as SELLER_LIST_LOAD_FAILED or a seller "not found".
+ *
+ * So this is where the pool *starts*, not where it is capped: `PoolWidth` climbs
+ * from here while throughput keeps improving. Cores are the honest opening bid
+ * because the plateau tracked them, and network waits — which cost no CPU — are
+ * exactly what makes the true optimum higher on some runs and not others.
+ */
+export function startingPoolWidth(ceiling: number): number {
+  const cores = Math.max(1, cpus().length);
+  return Math.max(1, Math.min(ceiling, Math.max(MIN_POOL_WIDTH, cores)));
+}
+
 /* ------------------------------------------------------------------ options */
 
 export const DEFAULT_OPTIONS: ResolvedOptions = {
@@ -116,6 +151,9 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // Zero hits in 1010 recorded products; it only ever cost us response bodies.
   useNetworkCapture: false,
   preferDirectSellerNavigation: true,
+  // Read the buy box off the raw HTML before anything is rendered. Products the
+  // account already wins end there, and the rest skip the PDP render.
+  buyboxProbe: true,
   // Three concurrent contexts. Measured against a 202-product batch without a
   // single block; raise it only with the same evidence in hand.
   concurrency: 3,

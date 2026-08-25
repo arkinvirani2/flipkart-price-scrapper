@@ -14,7 +14,7 @@
  */
 
 import { chromium } from 'playwright';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -26,6 +26,7 @@ import {
 } from './productPage';
 import { extractSellers, findSellerByNameAnchored, showMoreButton } from './sellerDrawer';
 import { comparePrice, findSeller, parsePrice, pickBuyboxSeller } from './parser';
+import { readBuyboxHtml } from './buyboxProbe';
 import { resolveOptions, setVerbose } from './utils';
 
 const ROOT = join(__dirname, '..');
@@ -94,6 +95,17 @@ async function main(): Promise<void> {
     check('getMainPrice fallback ignores ad carousel', await getMainPrice(page, null, options), 236);
     // The PDP's delivery block reads "Fulfilled by Hcom" — this is the winning seller.
     check('getFulfilledBy', await getFulfilledBy(page), 'Hcom');
+
+    // The same three facts, read straight out of the served HTML with no browser
+    // involved. These MUST agree with the DOM answers above: the buy-box probe
+    // ends a product on them, and a silent disagreement would end it wrongly.
+    console.log('\nbuy-box probe (raw HTML, no rendering)');
+    const reading = readBuyboxHtml(readFileSync(PDP, 'utf8'));
+    check('readBuyboxHtml.fulfilledBy', reading.fulfilledBy, 'Hcom');
+    check('readBuyboxHtml.jsonLd.price', reading.jsonLd?.price, 236);
+    check('readBuyboxHtml.jsonLd.sku', reading.jsonLd?.sku, 'KMTHGNNHMYWQHJN7');
+    check('readBuyboxHtml.blocked', reading.blocked, null);
+    check('readBuyboxHtml.unavailable', reading.unavailable, null);
 
     const entry = await findSellerListEntry(page, jsonLd, 'https://www.flipkart.com/x/p/itm?pid=KMTHGNNHMYWQHJN7');
     check('"See other sellers" located', entry.link !== null, true);

@@ -43,15 +43,25 @@ export type RowStatus = 'pending' | 'running' | 'success' | 'failed' | 'paused' 
 /**
  * The most workers a batch may run.
  *
- * Ten contexts is what one Chromium instance and one residential IP take
- * without the pool starving itself: every worker owns a context, and contexts
- * compete for the same CPU, so past this the page-render waits inside the
- * scraper start expiring on machine load rather than on Flipkart being slow.
- * The scraper compensates for pool size where a starved wait would produce a
- * *wrong* answer (see settleSellerCount), but that compensation costs time and
- * has a limit; this is it.
+ * Twenty contexts in one Chromium instance behind one residential IP.
+ *
+ * Read this as a ceiling, not a target. Workers are browser contexts competing
+ * for the same cores, and on a host with fewer cores than workers, raising this
+ * number does not make a batch finish sooner — measured on eight cores against
+ * the real markup, twenty workers retired *fewer* products per second than
+ * eight, and stretched each product from four seconds to fifteen. Since every
+ * wait in the scraper is wall-clock, that stretch is what turns machine load
+ * into SELLER_LIST_LOAD_FAILED rows: the run gets no faster and the output gets
+ * worse.
+ *
+ * So the pool sizes itself. `PoolWidth` admits as many products at once as the
+ * machine is actually retiring work with, climbing towards this ceiling while
+ * that keeps paying and holding below it when it does not — a big host with
+ * slow network reaches twenty, a laptop settles near its core count, and
+ * neither has to be told which it is. Raising this number gives a capable host
+ * more room; it can no longer flood a small one.
  */
-export const MAX_CONCURRENCY = 10;
+export const MAX_CONCURRENCY = 20;
 
 /** The subset of ScraperOptions a dashboard user is allowed to set per job. */
 export interface JobOptions {
@@ -74,7 +84,7 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   // defaulting to it means the dashboard is polite out of the box. Note that
   // this is per worker, so the pool's aggregate request rate is roughly
   // `concurrency` times what a single worker would produce — at the default
-  // pool that is a product every ~150ms, which is why the delay is not lowered
+  // pool that is a product every ~75ms, which is why the delay is not lowered
   // to buy speed. Speed comes from the pool; the delay is what keeps it from
   // reading as a burst.
   delayMs: 1500,

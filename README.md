@@ -13,6 +13,7 @@ scraper/
   types.ts         input/output shapes
   utils.ts         logging, retry, condition-polling, option defaults
   parser.ts        price/name parsing + comparison (pure, browser-free)
+  buyboxProbe.ts   who holds the buy box, read off the raw HTML before anything renders
   productPage.ts   openProduct, getMainPrice, findSellerListEntry
   sellerDrawer.ts  openSellerDrawer, extractSellers, clickShowMoreUntilSellerFound, getSellerPrice
   scraper.ts       scrapeProduct / scrapeProducts orchestration
@@ -92,10 +93,12 @@ platform**: Playwright needs a persistent process and a real Chromium binary, a
 1000-product batch runs for hours (far past any function timeout), and the crash-recovery
 guarantee depends on a durable local disk. One *job* runs at a time by design — two
 uncoordinated batches would multiply the request rate with nothing sharing their
-back-offs. Within a job the scraper runs `concurrency` workers (dashboard default 10, the
-maximum; CLI default 3) that share one block gate and are paced per worker. Keep the host
-awake for the length of a batch, and size the host for the pool — ten contexts is roughly
-2 GB of Chromium.
+back-offs. Within a job the scraper runs up to `concurrency` workers (dashboard default 20,
+the maximum; CLI default 3) that share one block gate and are paced per worker. How many of
+them scrape *at once* is decided by the machine, not by the setting — see **Pool width**
+below. Keep the host awake for the length of a batch, and size the host for the pool — ten
+contexts is roughly 2 GB of Chromium, so a full twenty-worker pool wants ~4 GB free and
+cores to match.
 
 ## Usage
 
@@ -228,6 +231,55 @@ value wins — ratings like "4.1" are excluded because the pattern requires ₹/
 **Wrong data is worse than no data.** When the price cannot be established confidently the
 scraper returns `MAIN_PRICE_NOT_FOUND` rather than a plausible-looking guess.
 
+**The buy box is asked first, and off the raw HTML.** See the next section — it is the
+largest single saving in a batch, and the one place where the fast answer and the slow
+answer are checked against each other in the regression suite.
+
+## The buy box decides how much work a product needs
+
+If the account already holds the buy box, the product page price *is* our price. Nothing is
+being compared, the difference is zero, and the current bank settlement is the final bank
+settlement. Everything after that question — the seller list, the "Show more" paging, the
+price comparison — would only confirm a number already in hand.
+
+So the question is asked before anything is rendered. Flipkart server-renders both facts the
+answer needs — the `Fulfilled by <name>` line and a `<script type="application/ld+json">`
+blob carrying the price, FSN and availability — so `buyboxProbe.ts` fetches the product page
+as **HTML through the browser context** (same user agent, same cookie jar, no renderer) and
+reads them out of the markup.
+
+Two things follow from the answer:
+
+- **The buy box is ours** → the product is finished right there, with `mainPrice`,
+  `sellerPrice`, `mainListingIsAccountSeller: true` and a zero difference. No browser page
+  is ever opened for it.
+- **Someone else holds it** → the probe has already read the price, so the browser opens
+  **straight onto `/sellers?pid=<FSN>`**. The product page is not rendered at all; it had
+  nothing left to say.
+
+A probe is an accelerator, never a verdict. A non-200, a missing `Fulfilled by` line, an
+out-of-stock marker, a bot wall, unparseable structured data — each returns nothing, logs
+why, and the product is rendered exactly as it was before the probe existed. So the worst a
+probe can cost is one wasted HTML fetch, and no failure of it can change what a product
+reports. `--no-buybox-probe` turns it off, which changes speed and nothing else.
+
+Measured on 24 live products (7 already ours), four workers, idle browsing off:
+
+| | probe off | probe on |
+| --- | --- | --- |
+| batch wall-clock | 29.5 s | **22.5 s** |
+| median product we already win | 1744 ms | **662 ms** |
+| median product we do not win | 4278 ms | **2890 ms** |
+
+The second row is the point of the feature. The third is the side effect of never rendering
+a product page: one render per product instead of two, which matters most on a full pool,
+where the width controller is trading against exactly that cost.
+
+One bonus, unrelated to speed: the `Fulfilled by` line is always in the served markup but is
+not always in the rendered DOM when the extractor looks. Reading it from the HTML settles a
+handful of products per hundred that the rendered read left to be inferred from the seller
+list.
+
 ## Regression suite
 
 ```bash
@@ -280,30 +332,67 @@ silently blend into one output file.
 ## Operational notes
 
 - Batch runs use **one browser with `--concurrency` contexts** (CLI default 3, dashboard
-  default 10, hard ceiling `MAX_CONCURRENCY` = 10). Every worker waits on a shared block
+  default 20, hard ceiling `MAX_CONCURRENCY` = 20). Every worker waits on a shared block
   gate, so a bot wall backs the whole pool off rather than one worker. `--concurrency 1`
   restores the old strictly-sequential behaviour. N workers means roughly N times the
   request rate from one address, so a batch that comes back with an unusual number of
   `SELLER_NOT_FOUND` / `SELLER_LIST_LOAD_FAILED` rows is worth rerunning on a smaller pool
   before its numbers are trusted.
 - Worker starts are staggered by the run's own `delayMs` (floor `WORKER_RAMP_MS`, 750ms),
-  so a ten-worker pool does not open ten contexts and fire ten navigations at once — that
-  burst is both the most block-prone moment of a run and the worst moment for CPU. The
-  offset also keeps workers out of lockstep for the rest of the batch.
+  so a twenty-worker pool does not open twenty contexts and fire twenty navigations at
+  once — that burst is both the most block-prone moment of a run and the worst moment for
+  CPU. The offset also keeps workers out of lockstep for the rest of the batch. It costs
+  `(workers - 1) x delayMs` to bring the pool up (~28s at 20 workers and the default
+  1500ms), paid once per run.
+- **Pool width.** `concurrency` is a ceiling on workers, not a promise about how many run
+  at once. Workers are browser contexts sharing the host's cores, and past the point where
+  they saturate it another worker subtracts throughput instead of adding it. Measured on
+  eight cores against the saved Flipkart markup, 24 products:
+
+  | workers | 3 | 6 | 8 | 10 | 14 | 20 |
+  |---|---|---|---|---|---|---|
+  | products/sec | 1.11 | 1.60 | **1.77** | 1.66 | 1.77 | 1.28 |
+  | per product | 1.9s | 3.8s | 4.2s | 5.9s | 6.6s | **15.5s** |
+
+  That second row is why an over-wide pool also *fails* more: every wait in the scraper is
+  wall-clock, so a product stretched to 15s runs its waits into the 20s action timeout and
+  is recorded as `SELLER_LIST_LOAD_FAILED` or a seller "not found" — the run gets no
+  faster and the output gets worse. So `PoolWidth` (scraper/poolWidth.ts) admits products
+  against a width it tunes itself: it measures throughput at each width it tries and sits
+  on the best one, re-checking the neighbours every few rounds because a host that is busy
+  now may not be later. Equal throughput always keeps the *narrower* width, since the
+  narrower one finishes each product sooner and that is what keeps products clear of their
+  timeouts. `npm run test:width` covers convergence, the floor, the ceiling, and the gate.
+- Timeouts scale with the live width (`pacedForWidth`, capped at 2.5x). A wait that expires
+  because nineteen siblings were rendering is not a scrape failure, and on the happy path
+  patience is free — every wait returns the moment its condition holds.
+- A failure that describes the *run* rather than the listing gets one retry in a fresh
+  context: `NO_SELLER_LINK`, `SELLER_LIST_LOAD_FAILED`, `MAIN_PRICE_NOT_FOUND`,
+  `SELLER_PRICE_NOT_FOUND`, `ERROR`. `PRODUCT_UNAVAILABLE` and `SELLER_NOT_FOUND` are
+  answers, not flakes, and are never retried — a second scrape for every correct negative
+  would be paid on every batch.
 - Pool size changes one wait, deliberately: `settleSellerCount`'s quiet window scales with
-  `concurrency` (300ms at 3 workers, 1.2s at 10). Every other wait expires into an honest
-  failure that the dashboard can retry; that one expires into an *answer*, and a seller
-  list declared complete while it was merely starved of CPU reads as "this seller does not
-  sell this product" — a wrong number, not a visible failure.
+  the live width (300ms at 3 in flight, 1.2s at 10, 2.1s at 20). Every other wait expires
+  into an honest failure that the dashboard can retry; that one expires into an *answer*,
+  and a seller list declared complete while it was merely starved of CPU reads as "this
+  seller does not sell this product" — a wrong number, not a visible failure. The loop
+  polls `countSellerCards`, which counts exactly what `extractSellers` would return without
+  reading a price or resolving a style, so the window is cheap enough not to feed the
+  starvation it is compensating for.
 - Row identity never depends on completion order: results are journalled under
   `sku + productUrl` and joined back to the uploaded rows by that key, so the Index column
   in the queue and in the recommendation export is always the uploaded position, whatever
-  order ten workers finish in. `npm run test:pool` is the regression test for that,
+  order twenty workers finish in. `npm run test:pool` is the regression test for that
+  at the full `MAX_CONCURRENCY` width,
   including the retry path and one SKU listed under two FSNs.
 - Images, media and fonts are dropped before they are fetched (`--no-block-resources`
   keeps them). CSS and JS are **never** blocked: seller cards mark the struck-through MRP
   with `line-through`, and `extractSellers` tells it from the selling price by asking
   `getComputedStyle`. Blocking CSS would silently report MRPs as selling prices.
+- The buy-box probe (on by default, `--no-buybox-probe` to disable) reads the winning
+  seller and the price out of the served HTML before a page is opened. Products the account
+  already wins never open one; the rest go straight to the seller list. See "The buy box
+  decides how much work a product needs".
 - `--screenshot-dir <dir>` writes a screenshot for each failed product.
 - Pass `storageStatePath` if you need a logged-in session.
 - Flipkart's markup differs across A/B buckets and viewports — both known seller layouts

@@ -7,6 +7,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { probeBuybox } from './buyboxProbe';
 import { humanBehavior } from './humanBehavior';
 import { comparePrice, pickBuyboxSeller, sellerNamesMatch } from './parser';
 import {
@@ -17,9 +18,11 @@ import {
   openProduct,
   readPageSignals,
   readProductJsonLd,
+  type SellerListEntry,
 } from './productPage';
+import { PoolWidth, pacedForWidth } from './poolWidth';
 import { attachNetworkCapture, getSellerPrice, openSellerDrawer, type NetworkCapture } from './sellerDrawer';
-import { BLOCKED_HOSTS, BLOCKED_RESOURCE_TYPES } from './selectors';
+import { BLOCKED_HOSTS, BLOCKED_RESOURCE_TYPES, sellersUrlForPid } from './selectors';
 import type {
   ResolvedOptions,
   ResultSink,
@@ -37,6 +40,7 @@ import {
   resolveOptions,
   runAsWorker,
   setVerbose,
+  startingPoolWidth,
 } from './utils';
 
 const DEFAULT_USER_AGENT =
@@ -146,7 +150,14 @@ export async function scrapeProducts(
   const gate = new BlockGate();
 
   const workerCount = Math.max(1, Math.min(Math.trunc(resolved.concurrency) || 1, inputs.length));
-  if (workerCount > 1) log.info(`scraping with ${workerCount} concurrent workers`);
+  // The workers are the ceiling; the width is how many of them may be scraping
+  // at any one moment. See PoolWidth for why those are different numbers.
+  const width = new PoolWidth(workerCount, startingPoolWidth(workerCount));
+  if (workerCount > 1) {
+    log.info(
+      `scraping with up to ${workerCount} concurrent workers, starting ${width.current()} wide`,
+    );
+  }
 
   let cursor = 0;
   let stopIntake = false;
@@ -162,13 +173,19 @@ export async function scrapeProducts(
   const browser = await launchBrowser(resolved);
 
   const runWorker = async (workerId: number): Promise<void> => {
-    // Stagger the start so a ten-worker pool does not open ten contexts and
-    // fire ten navigations in the same instant. That opening burst is both the
-    // most block-prone moment of a run and the worst moment for CPU: every
-    // context boots at once, and the page-render waits inside a product are
-    // measured against a machine that is briefly saturated. Spacing the starts
-    // by the run's own pacing also leaves the workers out of lockstep for the
-    // whole batch, so they keep arriving spread out rather than in waves.
+    // Stagger the start so a twenty-worker pool does not open twenty contexts
+    // and fire twenty navigations in the same instant. That opening burst is
+    // both the most block-prone moment of a run and the worst moment for CPU:
+    // every context boots at once, and the page-render waits inside a product
+    // are measured against a machine that is briefly saturated. Spacing the
+    // starts by the run's own pacing also leaves the workers out of lockstep for
+    // the whole batch, so they keep arriving spread out rather than in waves.
+    //
+    // The ramp is per worker, so a full pool takes (workers - 1) * delay to come
+    // up — about 28s at twenty workers and the default 1500ms pacing. That is
+    // paid once per run, against a batch the pool then retires twenty at a time,
+    // so it is left in place rather than compressed: this is the exact window
+    // where a wide pool would otherwise read as a burst.
     if (workerId > 0) {
       await delay(workerId * Math.max(resolved.delayMs, WORKER_RAMP_MS), resolved.signal);
       if (resolved.signal?.aborted) return;
@@ -182,10 +199,38 @@ export async function scrapeProducts(
       await gate.wait(resolved.signal);
       if (resolved.signal?.aborted || stopIntake) return;
 
+      // Hold a width slot for the whole product. Above the machine's capacity
+      // this is where the surplus workers wait — they keep their place in the
+      // queue, they simply do not add a twentieth renderer to an eight-core box.
+      if (!(await width.acquire(resolved.signal))) return;
+
       const input = inputs[index];
       log.step(`\n=== [${index + 1}/${inputs.length}] ${input.sku} — ${input.targetSeller} ===`);
 
-      const result = await scrapeWithBackoff(browser, input, resolved, gate, workerId);
+      const startedAt = Date.now();
+      let result: ScrapeResult;
+      try {
+        result = await scrapeWithBackoff(
+          browser,
+          input,
+          pacedForWidth(resolved, width.current()),
+          gate,
+          workerId,
+        );
+      } finally {
+        width.release();
+      }
+      // Wall-clock for the whole product, gap included — that is what the width
+      // controller is trying to trade against. `result.durationMs` stops at the
+      // last extraction and would leave the between-products pacing invisible.
+      //
+      // Only clean first attempts are measured. A product that sat out a block
+      // back-off carries a minute of Flipkart's decision in its duration, and a
+      // retried one carries a second scrape; feeding either to the controller
+      // would have it narrow the pool in response to something that has nothing
+      // to do with how loaded this machine is.
+      const firstAttempt = (result.attempts ?? 1) === 1 && result.status !== 'BLOCKED';
+      if (!resolved.signal?.aborted && firstAttempt) width.record(Date.now() - startedAt);
 
       // An abort mid-product produces a torn result — the context was closed out
       // from under Playwright. Dropping it unreported leaves the row exactly as
@@ -230,7 +275,34 @@ export async function scrapeProducts(
 /* ---------------------------------------------------------------- internals */
 
 /**
- * Run one product, pausing and retrying while it comes back BLOCKED.
+ * Failures that describe the run rather than the listing.
+ *
+ * Each of these means "we did not manage to read the page this time": the
+ * markup had not rendered when the wait expired, the seller list never came up,
+ * navigation threw. On an idle machine they are rare; under a pool they are
+ * mostly our own load coming back as an error, and a second look — in a fresh
+ * context, with the page rendered again from scratch — usually settles it.
+ *
+ * Deliberately absent:
+ *   - PRODUCT_UNAVAILABLE and SELLER_NOT_FOUND are *answers*. The listing is
+ *     dead, or the seller genuinely is not on it. Retrying them would pay a
+ *     second scrape for every correct negative in the batch, and the guard
+ *     against a starved seller list being mistaken for an absent seller is the
+ *     settling window in sellerDrawer, not a retry here.
+ *   - BLOCKED has its own back-off loop above; it must not also come through
+ *     here, or a bot wall would be retried without the pause that clears it.
+ */
+const TRANSIENT_STATUSES: readonly ScrapeStatus[] = [
+  'NO_SELLER_LINK',
+  'SELLER_LIST_LOAD_FAILED',
+  'MAIN_PRICE_NOT_FOUND',
+  'SELLER_PRICE_NOT_FOUND',
+  'ERROR',
+];
+
+/**
+ * Run one product, pausing and retrying while it comes back BLOCKED, then
+ * giving a run-shaped failure one more go.
  *
  * The pause doubles each time: a bot wall clears on Flipkart's schedule, not
  * ours, so hammering it at a fixed interval just extends the block. The pause is
@@ -257,6 +329,18 @@ async function scrapeWithBackoff(
 
     attempts++;
     result = await scrapeOnce(browser, input, options, attempts, workerId);
+  }
+
+  // One second look at a failure that reads as ours rather than the listing's.
+  // Bounded to a single extra attempt, and only ever on a product that is
+  // already lost — a batch that is scraping cleanly pays nothing for this.
+  if (!options.signal?.aborted && TRANSIENT_STATUSES.includes(result.status)) {
+    log.warn(`${result.status} — one retry in a fresh context before recording it.`);
+    attempts++;
+    const retried = await scrapeOnce(browser, input, options, attempts, workerId);
+    // Take the retry's verdict either way: it is the more recent evidence, and
+    // its screenshot and message describe the attempt that was actually kept.
+    if (!options.signal?.aborted) result = retried;
   }
 
   return { ...result, attempts };
@@ -361,7 +445,6 @@ async function scrapeInContext(
   betweenProducts = false,
 ): Promise<ScrapeResult> {
   const startedAt = Date.now();
-  const page = await context.newPage();
   const step = (name: Parameters<NonNullable<ResolvedOptions['onStep']>>[0]): void => {
     try {
       options.onStep?.(name, input, workerId);
@@ -370,62 +453,120 @@ async function scrapeInContext(
     }
   };
 
+  // 0. The buy box, first and off the raw HTML — no page, no renderer.
+  //
+  // This is the question that decides how much of the rest is worth doing. If
+  // the account already holds the buy box, its price IS the page price, the
+  // bank settlement does not move, and the seller list has nothing to add — so
+  // that product is finished here, having never opened a browser page at all.
+  //
+  // A null probe means "not conclusive", not "not ours": the full rendered
+  // pipeline below then runs exactly as it did before the probe existed.
+  step('opening');
+  const probe = options.buyboxProbe ? await probeBuybox(context, input.productUrl, options) : null;
+  if (probe) log.info(`fulfilled by: ${probe.buyboxSeller} (from page HTML)`);
+
+  if (probe && sellerNamesMatch(probe.buyboxSeller, input.targetSeller)) {
+    log.step('Buy box is already ours — no seller comparison needed.');
+    step('done');
+    // No page was opened, so there is nothing to browse idly on; the politeness
+    // throttle still applies, because the next product is a request either way.
+    if (betweenProducts) await jitteredDelay(options.delayMs, options.delayJitterMs, options.signal);
+    return {
+      fsn: input.fsn,
+      sku: input.sku,
+      sellerName: probe.buyboxSeller,
+      buyboxSellerName: probe.buyboxSeller,
+      mainListingIsAccountSeller: true,
+      mainPrice: probe.mainPrice,
+      sellerPrice: probe.mainPrice,
+      difference: null,
+      isPriceDifferent: false,
+      productUrl: input.productUrl,
+      status: 'OK',
+      durationMs: Date.now() - startedAt,
+      attempts: attempt,
+    };
+  }
+
+  // The seller list is addressable directly as /sellers?pid=<FSN>, and a probe
+  // has already answered everything the PDP would have been rendered for. Both
+  // halves have to hold: without a pid there is no address to open, and the
+  // click-through fallback needs a product page to come home to.
+  const knownPid = probe ? (probe.pid ?? (input.fsn || null)) : null;
+  const skipProductPage = probe !== null && knownPid !== null;
+
+  const page = await context.newPage();
   let capture: NetworkCapture | null = null;
   if (options.useNetworkCapture) capture = attachNetworkCapture(page);
 
   try {
-    // 1. Open the product page.
-    step('opening');
-    await openProduct(page, input.productUrl, options);
+    let mainPrice: number;
+    let fulfilledBy: string | null;
+    let entry: SellerListEntry;
 
-    // 2. Structured data first — it carries the price, sku and availability.
-    step('reading-page');
-    const jsonLd = await readProductJsonLd(page);
+    if (skipProductPage && probe) {
+      // Straight to the seller list. Rendering the PDP now would spend a second
+      // reproducing the two numbers already in hand.
+      mainPrice = probe.mainPrice;
+      fulfilledBy = probe.buyboxSeller;
+      entry = { link: null, url: sellersUrlForPid(knownPid as string), productUrl: probe.productUrl };
+    } else {
+      // 1. Open the product page.
+      await openProduct(page, input.productUrl, options);
 
-    // One read of the page's text answers the availability question. Structured
-    // data misses some of these — a listing whose JSON-LD still says InStock can
-    // render "Out of stock" — so the text check is not redundant with the above.
-    const signals = await readPageSignals(page);
-    const unavailable = await checkAvailability(page, jsonLd, signals);
-    if (unavailable) {
-      throw new ScrapeError('PRODUCT_UNAVAILABLE', unavailable);
-    }
+      // 2. Structured data first — it carries the price, sku and availability.
+      step('reading-page');
+      const jsonLd = await readProductJsonLd(page);
 
-    // 3. Main price.
-    step('main-price');
-    const mainPrice = await getMainPrice(page, jsonLd, options);
-    if (mainPrice === null) {
-      throw new ScrapeError('MAIN_PRICE_NOT_FOUND', 'Could not read the product page price.');
-    }
+      // One read of the page's text answers the availability question. Structured
+      // data misses some of these — a listing whose JSON-LD still says InStock can
+      // render "Out of stock" — so the text check is not redundant with the above.
+      const signals = await readPageSignals(page);
+      const unavailable = await checkAvailability(page, jsonLd, signals);
+      if (unavailable) {
+        throw new ScrapeError('PRODUCT_UNAVAILABLE', unavailable);
+      }
 
-    // 4. Who the page says is fulfilling this listing — the winning seller.
-    const fulfilledBy = await getFulfilledBy(page);
-    if (fulfilledBy) log.info(`fulfilled by: ${fulfilledBy}`);
+      // 3. Main price.
+      step('main-price');
+      const domPrice = await getMainPrice(page, jsonLd, options);
+      if (domPrice === null) {
+        throw new ScrapeError('MAIN_PRICE_NOT_FOUND', 'Could not read the product page price.');
+      }
+      mainPrice = domPrice;
 
-    // When the main listing is already the account's listing there is no seller
-    // comparison to make. Do not open the seller drawer for this product.
-    if (sellerNamesMatch(fulfilledBy, input.targetSeller)) {
-      step('done');
-      return {
-        fsn: input.fsn,
-        sku: input.sku,
-        sellerName: fulfilledBy,
-        buyboxSellerName: fulfilledBy,
-        mainListingIsAccountSeller: true,
-        mainPrice,
-        sellerPrice: mainPrice,
-        difference: null,
-        isPriceDifferent: false,
-        productUrl: input.productUrl,
-        status: 'OK',
-        durationMs: Date.now() - startedAt,
-        attempts: attempt,
-      };
+      // 4. Who the page says is fulfilling this listing — the winning seller.
+      fulfilledBy = await getFulfilledBy(page);
+      if (fulfilledBy) log.info(`fulfilled by: ${fulfilledBy}`);
+
+      // The probe answers this for most products, but a page it could not read
+      // reaches here unanswered — and the account holding the buy box still ends
+      // the product, whichever read established it.
+      if (sellerNamesMatch(fulfilledBy, input.targetSeller)) {
+        step('done');
+        return {
+          fsn: input.fsn,
+          sku: input.sku,
+          sellerName: fulfilledBy,
+          buyboxSellerName: fulfilledBy,
+          mainListingIsAccountSeller: true,
+          mainPrice,
+          sellerPrice: mainPrice,
+          difference: null,
+          isPriceDifferent: false,
+          productUrl: input.productUrl,
+          status: 'OK',
+          durationMs: Date.now() - startedAt,
+          attempts: attempt,
+        };
+      }
+
+      entry = await findSellerListEntry(page, jsonLd, input.productUrl, input.fsn);
     }
 
     // 5. Into the seller list.
     step('opening-sellers');
-    const entry = await findSellerListEntry(page, jsonLd, input.productUrl, input.fsn);
     await openSellerDrawer(page, entry, options);
 
     // 6. Find the seller, paging as needed.

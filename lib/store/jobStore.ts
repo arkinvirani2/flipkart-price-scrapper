@@ -21,6 +21,7 @@ import {
   rewriteJournal,
 } from '@/scraper/journal';
 import { sellerNamesMatch } from '@/scraper/parser';
+import { startingPoolWidth } from '@/scraper/utils';
 import type { OrdersReport } from '@/lib/demand';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 import { DEFAULT_JOB_OPTIONS } from '@/types/dashboard';
@@ -435,7 +436,14 @@ export function computeStats(jobId: string): JobStats {
   // Workers run in parallel, so N of them retire the queue N times as fast.
   // Without this the dashboard quotes a sequential ETA for a concurrent run and
   // is wrong by exactly the concurrency factor.
-  const workers = Math.max(1, options.concurrency || 1);
+  //
+  // The divisor is the width the scraper will actually run at, not the number
+  // of workers on the manifest. Those differ on purpose: the pool holds itself
+  // to what the machine can render at once (see PoolWidth), so on a host with
+  // fewer cores than workers, dividing by the manifest figure would quote an
+  // ETA that no run on that host could ever meet. `averageMs` is measured under
+  // whatever width the run settled on, so the two agree.
+  const workers = Math.max(1, startingPoolWidth(Math.max(1, options.concurrency || 1)));
 
   return {
     total: rows.length,

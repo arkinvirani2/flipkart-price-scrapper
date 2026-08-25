@@ -83,10 +83,16 @@ export function LiveProgressPanel({ progress, stats, isRunning }: Props) {
         {active ? (
           // One card per worker, keyed by worker id so a card belongs to the same
           // worker across renders and does not swap places as products finish.
-          // Past three workers the cards go two-up: ten of them stacked is a
-          // metre of scrolling, and the point of this panel is to take in the
-          // whole pool at a glance.
-          <div className={cn('grid gap-3', progress.length > 3 && 'xl:grid-cols-2')}>
+          // Past three workers the cards go two-up, and past ten three-up:
+          // twenty of them stacked is several metres of scrolling, and the
+          // point of this panel is to take in the whole pool at a glance.
+          <div
+            className={cn(
+              'grid gap-3',
+              progress.length > 3 && 'xl:grid-cols-2',
+              progress.length > 10 && '2xl:grid-cols-3',
+            )}
+          >
             {progress.map((live) => (
               <WorkerCard key={live.workerId} live={live} showLabel={progress.length > 1} />
             ))}

@@ -2,8 +2,8 @@
  * Out-of-order completion must not move a row.
  *
  * With a worker pool the journal is written in completion order, which is not
- * upload order — at ten workers a product can land ten places away from where
- * it started. Everything downstream (the queue's Index column, the settlement
+ * upload order — at twenty workers a product can land twenty places away from
+ * where it started. Everything downstream (the queue's Index column, the settlement
  * view, the recommendation export, and the row numbers a user reads back
  * against their own sheet) assumes a row keeps its uploaded position no matter
  * when its result arrives.
@@ -23,7 +23,7 @@ import { join } from 'node:path';
 
 import { computeStats, createJob, getJob, recordResult, requeueRows } from '@/lib/store/jobStore';
 import { buildRecommendation } from '@/lib/recommendation';
-import { DEFAULT_JOB_OPTIONS } from '@/types/dashboard';
+import { DEFAULT_JOB_OPTIONS, MAX_CONCURRENCY } from '@/types/dashboard';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 
 // The store reads this every time it resolves a path, so setting it before the
@@ -31,7 +31,10 @@ import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 const dataDir = mkdtempSync(join(tmpdir(), 'pool-test-'));
 process.env.SCRAPER_DATA_DIR = dataDir;
 
-const WORKERS = 10;
+// The ceiling itself, not a copy of it: this test exists to prove the join
+// survives the widest pool the app can actually run, so raising the ceiling
+// must widen the test with it rather than leave it guarding the old width.
+const WORKERS = MAX_CONCURRENCY;
 const COUNT = 25;
 
 /**
@@ -115,7 +118,7 @@ function assertAligned(jobId: string, expected: ScrapeInput[], label: string): v
   const job = createJob('pool', rows, { ...DEFAULT_JOB_OPTIONS, concurrency: WORKERS });
 
   // 7 is coprime with 25: a full permutation, and one that puts neighbours far
-  // apart the way ten workers racing through a queue does.
+  // apart the way twenty workers racing through a queue does.
   for (const index of scrambled(COUNT, 7)) {
     const row = recordResult(job.id, resultFor(rows[index], index));
     assert.ok(row, `result for index ${index} was not matched to a row`);

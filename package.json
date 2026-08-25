@@ -16,7 +16,8 @@
     "verify": "ts-node -T --project tsconfig.scraper.json scraper/verify.ts",
     "build:scraper": "tsc -p tsconfig.scraper.json",
     "typecheck:scraper": "tsc -p tsconfig.scraper.json --noEmit",
-    "postinstall": "playwright install chromium"
+    "postinstall": "playwright install chromium",
+    "test:width": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/poolWidth.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

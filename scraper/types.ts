@@ -122,7 +122,8 @@ export interface ScraperOptions {
    * and resume are unaffected by the interleaving.
    *
    * The ceiling here is Flipkart's tolerance, not ours: N workers means roughly
-   * N times the request rate from one IP. 3 is the tested default.
+   * N times the request rate from one IP. 3 is the CLI default; the dashboard
+   * runs the pool at MAX_CONCURRENCY (20), paced by `delayMs` per worker.
    */
   concurrency?: number;
 
@@ -148,6 +149,22 @@ export interface ScraperOptions {
   useNetworkCapture?: boolean;
   /** Skip clicking and navigate straight to /sellers?pid=... when we can. */
   preferDirectSellerNavigation?: boolean;
+
+  /**
+   * Ask who holds the buy box before rendering anything, by fetching the product
+   * page as HTML and reading its "Fulfilled by" line and structured data.
+   *
+   * On by default, and the single biggest saving in a batch: roughly a quarter
+   * of a typical run is already won by the account, and those products finish on
+   * the probe alone without ever opening a browser page. The rest skip the
+   * product-page render too — the probe has read the price, so the browser opens
+   * straight onto the seller list.
+   *
+   * A probe that is anything short of conclusive returns nothing and the product
+   * is rendered exactly as it was before, so turning this off changes speed and
+   * nothing else.
+   */
+  buyboxProbe?: boolean;
   /** Emit progress logs. */
   verbose?: boolean;
   /** Playwright storageState path, for a logged-in session if you need one. */

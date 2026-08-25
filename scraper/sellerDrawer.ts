@@ -22,7 +22,7 @@ import {
 import { extractSellersFromJson, findSeller, parsePrice, sellerNamesMatch } from './parser';
 import type { ResolvedOptions, SellerCard } from './types';
 import { ScrapeError, delay, dismissOverlays, log, waitFor, waitForPageSettled, withRetry } from './utils';
-import type { SellerListEntry } from './productPage';
+import { assertNotBlocked, type SellerListEntry } from './productPage';
 
 /* ----------------------------------------------------------- network capture */
 
@@ -140,6 +140,12 @@ export async function openSellerDrawer(
   );
 
   if (!opened) {
+    // A bot wall renders no seller cards either, and it is the one explanation
+    // that must not be filed as a load failure: BLOCKED pauses the whole pool,
+    // SELLER_LIST_LOAD_FAILED just retries into the same wall. This used to be
+    // covered by the product page having been checked on the way in; products
+    // that skip that render arrive here with the question still open.
+    await assertNotBlocked(page);
     throw new ScrapeError('SELLER_LIST_LOAD_FAILED', 'Seller list did not render any seller cards.');
   }
 }
@@ -179,8 +185,8 @@ async function firstSellerLinkOn(page: Page): Promise<Locator | null> {
 export async function waitForSellerList(page: Page, options: ResolvedOptions): Promise<number> {
   const first = await waitFor(
     async () => {
-      const sellers = await extractSellers(page);
-      return sellers.length > 0 ? sellers.length : null;
+      const count = await countSellerCards(page);
+      return count > 0 ? count : null;
     },
     { timeoutMs: options.timeout, description: 'seller cards' },
   );
@@ -202,14 +208,16 @@ async function settleSellerCount(
    * Scaled by pool size, and this is the reason the scraper knows how many
    * workers it has at all. Every worker's context competes for the same CPU, so
    * a chunk of cards that lands within 300ms on an idle machine can stall
-   * longer than that with ten contexts rendering at once. Every other wait in
-   * this file expires into a *failure* — an honest one, retryable from the
-   * dashboard. This one expires into an *answer*: a list declared complete when
+   * far longer than that with twenty contexts rendering at once. Every other
+   * wait in this file expires into a *failure* — an honest one, retryable
+   * from the dashboard. This one expires into an *answer*: a list declared complete when
    * it was merely starved reads as "the seller is not selling this product",
    * which is indistinguishable from the truth and lands in the recommendations
    * as fact. So it is the wait that gets the slack when the pool is wide.
    *
-   * Three workers keeps the original 300ms exactly; ten gets 1.2s.
+   * Three workers keeps the original 300ms exactly; ten gets 1.2s, and the
+   * twenty-worker default pool gets 2.1s. The settling deadline below is three
+   * quiet windows wide, so it still clears the window it is guarding.
    */
   const QUIET_POLLS = 2 * Math.max(1, Math.ceil((options.concurrency || 1) / 3));
 
@@ -225,7 +233,7 @@ async function settleSellerCount(
     await delay(POLL_MS, options.signal);
     if (options.signal?.aborted) break;
 
-    const current = (await extractSellers(page).catch(() => [])).length;
+    const current = await countSellerCards(page).catch(() => 0);
     if (current > best) {
       best = current;
       quiet = 0;
@@ -241,6 +249,42 @@ async function settleSellerCount(
 }
 
 /* ------------------------------------------------------------ DOM extraction */
+
+/**
+ * How many seller cards are rendered right now.
+ *
+ * Counts exactly what `extractSellers` would return — same card selectors, same
+ * "a card with no name is not a card" rule — and stops there. It reads no
+ * prices and calls no `getComputedStyle`.
+ *
+ * That distinction is the whole point. The settling loop below polls this every
+ * 150ms, and it only ever used the *length* of the extraction; on a 45-seller
+ * list the discarded work was two `getComputedStyle` calls per card per poll,
+ * up to fourteen polls per product, on every worker at once. Style resolution is
+ * the most expensive thing a page can be asked for, and paying for it here made
+ * the pool starve itself — which widened the very window that was doing the
+ * polling. Counting cheaply breaks that loop and leaves the answer identical.
+ */
+export async function countSellerCards(page: Page): Promise<number> {
+  return page.evaluate((selectors: DomExtractionSelectors) => {
+    const queryAll = (root: ParentNode, list: string[]): Element[] => {
+      for (const selector of list) {
+        const found = Array.from(root.querySelectorAll(selector));
+        if (found.length > 0) return found;
+      }
+      return [];
+    };
+
+    let count = 0;
+    for (const card of queryAll(document, selectors.card)) {
+      const nameEl = queryAll(card, selectors.name)[0];
+      // Same guard as extractSellers: a nameless card is a skeleton, not a
+      // seller, and counting one would end the settle a poll early.
+      if ((nameEl?.textContent ?? '').replace(/ /g, ' ').trim()) count++;
+    }
+    return count;
+  }, DOM_EXTRACTION_SELECTORS);
+}
 
 /**
  * Read every rendered seller card.

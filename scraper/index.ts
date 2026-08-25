@@ -51,6 +51,7 @@ interface CliArgs {
   journal?: string;
   resume: boolean;
   noHuman: boolean;
+  noBuyboxProbe: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -61,6 +62,7 @@ function parseArgs(argv: string[]): CliArgs {
     noBlockResources: false,
     resume: false,
     noHuman: false,
+    noBuyboxProbe: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -89,6 +91,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--journal': args.journal = next(); break;
       case '--resume': args.resume = true; break;
       case '--no-human': args.noHuman = true; break;
+      case '--no-buybox-probe': args.noBuyboxProbe = true; break;
       case '--help':
       case '-h':
         printUsage();
@@ -133,6 +136,12 @@ Flipkart seller price comparison
                           Default 3. Use 1 for strictly sequential behaviour.
     --no-block-resources  Load images, media and fonts too. They are dropped by
                           default; nothing the scraper reads comes from them.
+    --no-buybox-probe     Render every product page instead of first reading the
+                          buy-box holder and price out of its raw HTML. The probe
+                          is on by default and is a batch's single biggest saving:
+                          products the account already wins finish without opening
+                          a browser page at all, and the rest go straight to the
+                          seller list.
 
   Batch pacing and recovery:
     --delay <ms>          Pause between products. Default 0. Use ~1500 for 1000+ items.
@@ -160,6 +169,7 @@ function toOptions(args: CliArgs): ScraperOptions {
     blockBackoffMs: args.blockBackoff,
     blockRetries: args.blockRetries,
     humanLikeBehavior: !args.noHuman,
+    buyboxProbe: !args.noBuyboxProbe,
   };
 }
 
