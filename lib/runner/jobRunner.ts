@@ -6,22 +6,30 @@
  * hand it, to persist each result as it lands, and to translate the scraper's
  * callbacks into dashboard events.
  *
- * One at a time is not a simplification: the scraper is sequential by design
- * because Flipkart rate-limits hard, and running two batches concurrently would
- * trip the bot wall that the delay/back-off logic exists to avoid.
+ * One JOB at a time is not a simplification: two batches at once would multiply
+ * the request rate against a host that rate-limits hard, with nothing
+ * coordinating their back-offs. Within a job the scraper runs
+ * `options.concurrency` workers, which share one block gate and are paced
+ * per worker — bounded in a way two uncoordinated jobs would not be.
  *
  * ── Pause vs Stop ───────────────────────────────────────────────────────────
  * Both use the same AbortSignal; what differs is *when* it fires.
  *
- * Pause fires it from inside `onResult` — the callback the scraper invokes
- * after a product is finished and journalled, but before the next one starts.
- * So the in-flight product completes and is saved, and the loop exits at the
- * top of the next iteration. Nothing is lost and nothing is half-done.
+ * Pause does not fire the signal at all — it sets the run's intent, and the
+ * scraper's `shouldStop` hook reads that before a worker picks up its next
+ * product. Every worker finishes and journals the product it is holding, then
+ * exits. Nothing is lost and nothing is half-done.
  *
- * Stop fires it immediately. The scraper closes the active browser context,
- * which unblocks whatever Playwright call was in flight, and drops the torn
- * result rather than journalling it. That row stays pending and a later resume
- * scrapes it cleanly.
+ * Firing the signal for a Pause would be wrong under a worker pool: it closes
+ * every active context, so the two products the OTHER workers were part-way
+ * through would be torn up and abandoned, when the user asked only to stop after
+ * the current one.
+ *
+ * Stop fires the signal immediately, which is exactly that tear-down, and is
+ * what Stop means. The scraper closes the active contexts, unblocking whatever
+ * Playwright calls were in flight, and drops the torn results rather than
+ * journalling them. Those rows stay pending and a later resume scrapes them
+ * cleanly.
  */
 
 import { resultKey } from '@/scraper/journal';
@@ -49,7 +57,14 @@ interface ActiveRun {
   controller: AbortController;
   /** What the user asked for. Drives the final state and when the abort fires. */
   intent: 'run' | 'pause' | 'stop';
-  progress: LiveProgress | null;
+  /**
+   * One live slot per worker, keyed by worker id.
+   *
+   * A Map rather than a single field because several products are genuinely in
+   * flight at once; a lone slot would flicker between them and under-report what
+   * the run is doing.
+   */
+  progress: Map<number, LiveProgress>;
   /** Resolves when the background scrape settles. Used by tests and shutdown. */
   finished: Promise<void>;
 }
@@ -72,8 +87,10 @@ export class JobRunner {
     return state.active?.jobId === jobId;
   }
 
-  progress(): LiveProgress | null {
-    return state.active?.progress ?? null;
+  /** Every product currently in flight, ordered by worker id for a stable UI. */
+  progress(): LiveProgress[] {
+    if (!state.active) return [];
+    return [...state.active.progress.values()].sort((a, b) => a.workerId - b.workerId);
   }
 
   /**
@@ -109,7 +126,7 @@ export class JobRunner {
       jobId,
       controller,
       intent: 'run',
-      progress: null,
+      progress: new Map(),
       finished: Promise.resolve(),
     };
     state.active = run;
@@ -133,10 +150,17 @@ export class JobRunner {
     if (!run || run.jobId !== jobId) return { ok: false, error: 'That job is not running.' };
     if (run.intent !== 'run') return { ok: false, error: `Already ${run.intent}ing.` };
 
+    // Setting the intent is the whole mechanism: `shouldStop` reports it to the
+    // scraper, which stops handing out work. Every in-flight product still runs
+    // to completion and is journalled.
     run.intent = 'pause';
     setJobState(jobId, 'pausing');
     this.publishState(jobId, 'pausing');
-    this.log(jobId, 'warn', 'Pause requested — finishing the current product before stopping.');
+    this.log(
+      jobId,
+      'warn',
+      'Pause requested — finishing the products already in flight before stopping.',
+    );
     return { ok: true };
   }
 
@@ -171,8 +195,11 @@ export class JobRunner {
     // Route the scraper's own log lines into this job's log file and the live
     // viewer. Console output stays on for the terminal.
     setVerbose(true);
-    setLogSink((level, message) => {
-      const current = run.progress;
+    setLogSink((level, message, workerId) => {
+      // Attribute the line to the product THAT worker is on. Reading a single
+      // "current product" here would tag every line with whichever worker
+      // happened to report last, quietly filing failures under the wrong SKU.
+      const current = run.progress.get(workerId);
       this.log(jobId, level as LogLevel, message, {
         sku: current?.sku,
         fsn: current?.fsn,
@@ -192,12 +219,16 @@ export class JobRunner {
           timeout: options.timeout,
           blockBackoffMs: options.blockBackoffMs,
           blockRetries: options.blockRetries,
+          concurrency: options.concurrency,
+          blockResources: options.blockResources,
           useNetworkCapture: options.useNetworkCapture,
           headless: !options.headed,
           verbose: true,
           screenshotOnFailureDir: jobPaths.screenshots(jobId),
           signal: controller.signal,
-          onStep: (step, input) => this.onStep(run, keyToIndex, step, input),
+          // Pause drains; only Stop aborts. See the note at the top of the file.
+          shouldStop: () => run.intent !== 'run',
+          onStep: (step, input, workerId) => this.onStep(run, keyToIndex, step, input, workerId),
         },
         (result) => this.onResult(run, keyToIndex, result),
       );
@@ -215,26 +246,31 @@ export class JobRunner {
     keyToIndex: Map<string, number>,
     step: ScrapeStep,
     input: ScrapeInput,
+    workerId: number,
   ): void {
     const index = keyToIndex.get(resultKey(input)) ?? -1;
+    const previous = run.progress.get(workerId);
 
-    if (run.progress?.rowIndex !== index && index >= 0) {
+    if (previous?.rowIndex !== index && index >= 0) {
       setRowStatus(run.jobId, index, 'running');
     }
 
-    run.progress = {
+    run.progress.set(workerId, {
       jobId: run.jobId,
+      workerId,
       rowIndex: index,
       sku: input.sku,
       fsn: input.fsn,
       targetSeller: input.targetSeller,
       productUrl: input.productUrl,
       step,
-      startedAt: run.progress?.rowIndex === index ? run.progress.startedAt : new Date().toISOString(),
+      // Keep the original start time while this worker stays on this row, so the
+      // elapsed timer measures the product rather than the latest step.
+      startedAt: previous?.rowIndex === index ? previous.startedAt : new Date().toISOString(),
       browserStatus: 'scraping',
-    };
+    });
 
-    publish(run.jobId, { type: 'progress', progress: run.progress });
+    publish(run.jobId, { type: 'progress', progress: this.progress() });
   }
 
   /**
@@ -264,12 +300,33 @@ export class JobRunner {
           durationMs: result.durationMs,
         },
       );
+    } else {
+      // The journal took the line but no row answers to its key, so nothing in
+      // the dashboard will ever show this product's result. That should be
+      // impossible — the key is sku + productUrl, both echoed back from the
+      // input — and it stays silent without this, which is exactly the kind of
+      // loss a wide pool would be blamed for. Say it out loud instead.
+      this.log(
+        run.jobId,
+        'error',
+        `${result.sku}: result could not be matched to any row in this batch (key "${resultKey(result)}") — it is journalled but not shown.`,
+        { sku: result.sku, fsn: result.fsn },
+      );
     }
 
-    run.progress = null;
-    publish(run.jobId, { type: 'progress', progress: null });
-
-    if (run.intent === 'pause') run.controller.abort();
+    // Free just this product's slot. Clearing the whole map would blank the
+    // other workers, which are still mid-product.
+    //
+    // Matched on the product rather than on the row index alone, because
+    // `recordResult` returns null for a key it does not recognise — and a slot
+    // that never clears would leave a finished product on screen until the run
+    // ends.
+    for (const [workerId, live] of run.progress) {
+      const sameRow = row != null && live.rowIndex === row.index;
+      const sameProduct = live.sku === result.sku && live.productUrl === result.productUrl;
+      if (sameRow || sameProduct) run.progress.delete(workerId);
+    }
+    publish(run.jobId, { type: 'progress', progress: this.progress() });
   }
 
   /** Settle the job into its resting state and release the runner slot. */
@@ -312,10 +369,10 @@ export class JobRunner {
       }
     }
 
-    run.progress = null;
+    run.progress.clear();
     state.active = null;
 
-    publish(jobId, { type: 'progress', progress: null });
+    publish(jobId, { type: 'progress', progress: [] });
     this.publishState(jobId, next);
   }
 

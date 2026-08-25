@@ -85,8 +85,14 @@ export type ScrapeStep =
   | 'comparing'
   | 'done';
 
-/** Called as a product moves through the pipeline. Purely informational. */
-export type StepReporter = (step: ScrapeStep, input: ScrapeInput) => void;
+/**
+ * Called as a product moves through the pipeline. Purely informational.
+ *
+ * `workerId` is the 0-based index of the worker that owns this product. With
+ * `concurrency: 1` it is always 0; above that it is what lets a caller keep
+ * one live progress slot per worker instead of thrashing a single shared one.
+ */
+export type StepReporter = (step: ScrapeStep, input: ScrapeInput, workerId: number) => void;
 
 /** A seller row as read off the page (or a network payload). */
 export interface SellerCard {
@@ -107,7 +113,38 @@ export interface ScraperOptions {
    * normally stops when the seller is found or the button disappears.
    */
   maxShowMoreClicks?: number;
-  /** Try to reuse a captured seller API/network payload before DOM scraping. */
+  /**
+   * How many products to scrape at once, each in its own browser context.
+   *
+   * 1 reproduces the old strictly-sequential behaviour exactly. Above that,
+   * results still stream through `onResult` the moment each product lands, and
+   * the journal is keyed by product rather than by position, so completeness
+   * and resume are unaffected by the interleaving.
+   *
+   * The ceiling here is Flipkart's tolerance, not ours: N workers means roughly
+   * N times the request rate from one IP. 3 is the tested default.
+   */
+  concurrency?: number;
+
+  /**
+   * Drop images, media and fonts before they are fetched. On by default: a
+   * Flipkart PDP pulls ~90 images that no extractor ever reads.
+   *
+   * Stylesheets and scripts are always allowed through, whatever this is set
+   * to — the struck-through MRP is told apart from the selling price with
+   * `getComputedStyle`, and that decoration comes from Flipkart's external CSS
+   * bundles. Blocking CSS would not fail loudly; it would silently start
+   * reporting MRPs as selling prices.
+   */
+  blockResources?: boolean;
+
+  /**
+   * Try to reuse a captured seller API/network payload before DOM scraping.
+   *
+   * Off by default. Across 1010 recorded products it resolved zero of them,
+   * while buffering the JSON body of every response whose URL merely looked
+   * seller-ish. Left in as an opt-in for the day Flipkart exposes a real one.
+   */
   useNetworkCapture?: boolean;
   /** Skip clicking and navigate straight to /sellers?pid=... when we can. */
   preferDirectSellerNavigation?: boolean;
@@ -151,6 +188,19 @@ export interface ScraperOptions {
    */
   signal?: AbortSignal;
 
+  /**
+   * Asked before each worker picks up its NEXT product. Return true to wind the
+   * pool down gracefully.
+   *
+   * This is the difference between a Pause and a Stop. `signal` tears down the
+   * active contexts at once, which abandons every product currently in flight —
+   * correct for a Stop, but under a worker pool it would throw away the other
+   * workers' half-finished products too, when the user only asked to stop after
+   * the current one. Draining lets each worker finish and journal what it holds
+   * and then exit, so nothing is left half-done.
+   */
+  shouldStop?: () => boolean;
+
   /** Fires as each product moves through the pipeline. Drives the live progress panel. */
   onStep?: StepReporter;
 }
@@ -160,11 +210,15 @@ export type ResultSink = (result: ScrapeResult, index: number) => void | Promise
 
 export interface ResolvedOptions
   extends Required<
-    Omit<ScraperOptions, 'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent' | 'signal' | 'onStep'>
+    Omit<
+      ScraperOptions,
+      'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent' | 'signal' | 'onStep' | 'shouldStop'
+    >
   > {
   storageStatePath?: string;
   screenshotOnFailureDir?: string;
   userAgent?: string;
   signal?: AbortSignal;
   onStep?: StepReporter;
+  shouldStop?: () => boolean;
 }

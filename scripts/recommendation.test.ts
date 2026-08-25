@@ -119,7 +119,7 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
 
 /* ------------------------------------------------- preserved existing coverage */
 // We are ₹6 cheaper than the buy box, so the settlement rises: 119 + 6 = 125 > 115.
-assert.deepEqual(buildRecommendation(row({})), { key: 'x', fsn: 'FSN', diffAmount: 6, status: 'Safe', finalBankSettlement: 125, reason: null });
+assert.deepEqual(buildRecommendation(row({})), { key: 'x', index: 0, sku: 'x', fsn: 'FSN', diffAmount: 6, status: 'Safe', finalBankSettlement: 125, reason: null });
 // ₹30 on a ₹100 price is over the 20% band.
 {
   const wide = buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 115 }));
@@ -137,5 +137,27 @@ assert.deepEqual(buildRecommendation(row({})), { key: 'x', fsn: 'FSN', diffAmoun
 }
 // Not Safe outranks the 20% band: breaking the minimum is the more serious call.
 assert.equal(buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 160 })).status, 'Not Safe');
+
+/* ------------------------------------------------- row-to-input mapping */
+// Every recommendation carries its row's own index and sku, whatever the row's
+// status. This is what lets the table and the export be read against the source
+// sheet now that the worker pool finishes products out of upload order.
+{
+  const rows: JobRow[] = [
+    row({ index: 0, key: 'a', sku: 'SKU-A', fsn: 'FSN-A' }),
+    // Unscraped, so it takes the `unevaluated` path — which must carry the
+    // index too, or a Need Review row would lose its place in the file.
+    row({ index: 1, key: 'b', sku: 'SKU-B', fsn: 'FSN-B', status: 'pending', result: undefined }),
+    row({ index: 2, key: 'c', sku: 'SKU-C', fsn: 'FSN-C' }),
+  ];
+
+  const built = rows.map(buildRecommendation);
+  assert.deepEqual(built.map((item) => item.index), [0, 1, 2]);
+  assert.deepEqual(built.map((item) => item.sku), ['SKU-A', 'SKU-B', 'SKU-C']);
+  assert.deepEqual(built.map((item) => item.fsn), ['FSN-A', 'FSN-B', 'FSN-C']);
+  // The mapping is positional AND keyed, so a reader can verify either way.
+  assert.deepEqual(built.map((item) => item.key), ['a', 'b', 'c']);
+  assert.equal(built[1].status, 'Need Review');
+}
 
 console.log('Recommendation tests passed.');

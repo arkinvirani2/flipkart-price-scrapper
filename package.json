@@ -11,6 +11,7 @@
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:recommendation": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/recommendation.test.ts",
+    "test:pool": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/pool.test.ts",
     "scrape": "ts-node --project tsconfig.scraper.json scraper/index.ts",
     "verify": "ts-node -T --project tsconfig.scraper.json scraper/verify.ts",
     "build:scraper": "tsc -p tsconfig.scraper.json",

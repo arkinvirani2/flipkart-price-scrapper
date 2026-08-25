@@ -14,6 +14,21 @@ export type RecommendationStatus =
 
 export interface Recommendation {
   key: string;
+  /**
+   * The row's position in the uploaded file, 0-based — `JobRow.index`, carried
+   * through unchanged.
+   *
+   * Recommendations are built by mapping over the job's rows, which are built by
+   * mapping over the inputs, so this is always the upload's own ordering. It is
+   * surfaced because the scrape no longer finishes products in that order: with
+   * a worker pool the journal is written in completion order, and results are
+   * joined back to rows by key rather than by position. Carrying the index makes
+   * that mapping visible in the table and the export instead of something a
+   * reader has to take on trust.
+   */
+  index: number;
+  /** The row's Seller SKU ID. Pairs with `index` to identify a row on sight. */
+  sku: string;
   fsn: string;
   diffAmount: number | null;
   status: RecommendationStatus;
@@ -33,6 +48,8 @@ export interface Recommendation {
 function unevaluated(row: JobRow, status: RecommendationStatus, reason: string): Recommendation {
   return {
     key: row.key,
+    index: row.index,
+    sku: row.sku,
     fsn: row.fsn,
     diffAmount: null,
     status,
@@ -74,6 +91,8 @@ export function buildRecommendation(row: JobRow): Recommendation {
   if (settlement.bankSettlementThreshold === null || !Number.isFinite(settlement.bankSettlementThreshold)) {
     return {
       key: row.key,
+      index: row.index,
+      sku: row.sku,
       fsn: row.fsn,
       diffAmount,
       status: 'Threshold Missing',
@@ -90,6 +109,8 @@ export function buildRecommendation(row: JobRow): Recommendation {
   if (!(settlement.finalBankSettlement > settlement.bankSettlementThreshold)) {
     return {
       key: row.key,
+      index: row.index,
+      sku: row.sku,
       fsn: row.fsn,
       diffAmount,
       status: 'Not Safe',
@@ -103,6 +124,8 @@ export function buildRecommendation(row: JobRow): Recommendation {
     const cappedMove = Math.sign(diffAmount) * settlement.sellerPrice * 0.2;
     return {
       key: row.key,
+      index: row.index,
+      sku: row.sku,
       fsn: row.fsn,
       diffAmount,
       status: 'Safe but more than 20%',
@@ -112,6 +135,8 @@ export function buildRecommendation(row: JobRow): Recommendation {
   }
   return {
     key: row.key,
+    index: row.index,
+    sku: row.sku,
     fsn: row.fsn,
     diffAmount,
     status: 'Safe',

@@ -23,6 +23,7 @@ import {
 import { sellerNamesMatch } from '@/scraper/parser';
 import type { OrdersReport } from '@/lib/demand';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
+import { DEFAULT_JOB_OPTIONS } from '@/types/dashboard';
 import type {
   JobManifest,
   JobOptions,
@@ -164,6 +165,11 @@ export function getJob(jobId: string): JobRecord | null {
     // files the user never asked us to touch.
     if (!manifest.accountName) manifest.accountName = inputs[0]?.targetSeller ?? '';
     if (!manifest.uploadTime) manifest.uploadTime = manifest.createdAt;
+    // Likewise for options added after a job was created — `concurrency` and
+    // `blockResources`, in particular. The scraper already falls back to its own
+    // defaults for an absent key, so without this the runner would quietly use
+    // three workers while `computeStats` quoted a one-worker ETA.
+    manifest.options = { ...DEFAULT_JOB_OPTIONS, ...manifest.options };
     // readJournal, not the resume filter: the UI should show BLOCKED rows as the
     // failures they were. Blocked rows are only dropped when a run actually starts.
     const journal = readJournal(jobPaths.journal(jobId)) as JournalRow[];
@@ -419,9 +425,17 @@ export function computeStats(jobId: string): JobStats {
     : null;
 
   // The throttle between products is real wall-clock time; leaving it out makes
-  // a 1000-item estimate hours too optimistic.
+  // a 1000-item estimate hours too optimistic. It overlaps the idle-browsing
+  // burst rather than following it, so the gap costs the larger of the two, not
+  // their sum — and both are per worker.
+  const options = record.manifest.options;
   const perProductMs =
-    averageMs === null ? null : averageMs + record.manifest.options.delayMs + record.manifest.options.delayJitterMs / 2;
+    averageMs === null ? null : averageMs + options.delayMs + options.delayJitterMs / 2;
+
+  // Workers run in parallel, so N of them retire the queue N times as fast.
+  // Without this the dashboard quotes a sequential ETA for a concurrent run and
+  // is wrong by exactly the concurrency factor.
+  const workers = Math.max(1, options.concurrency || 1);
 
   return {
     total: rows.length,
@@ -432,7 +446,8 @@ export function computeStats(jobId: string): JobStats {
     failed,
     successRate: completed ? Math.round((succeeded / completed) * 1000) / 10 : null,
     averageMs,
-    estimatedRemainingMs: perProductMs === null ? null : Math.round(perProductMs * (pending + running)),
+    estimatedRemainingMs:
+      perProductMs === null ? null : Math.round((perProductMs * (pending + running)) / workers),
     queueLength: pending,
   };
 }

@@ -3,6 +3,7 @@
  * Deliberately dependency-free apart from Playwright's Page type.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Page } from 'playwright';
 import type { ResolvedOptions, ScraperOptions } from './types';
 
@@ -16,17 +17,44 @@ export function setVerbose(v: boolean): void {
 
 export type LogLevel = 'step' | 'info' | 'warn' | 'error';
 
-/** Receives every log line, regardless of `verbose`. */
-export type LogSink = (level: LogLevel, message: string) => void;
+/**
+ * Receives every log line, regardless of `verbose`.
+ *
+ * `workerId` says which worker emitted the line. Without it, concurrent workers
+ * produce a single interleaved stream in which no line can be attributed to the
+ * product that caused it — every "Seller not found" would be guesswork.
+ */
+export type LogSink = (level: LogLevel, message: string, workerId: number) => void;
 
 let sink: LogSink | null = null;
+
+/**
+ * Which worker the currently-running code belongs to.
+ *
+ * A plain module variable cannot do this job: the moment a worker awaits, some
+ * other worker's continuation runs and would overwrite it, so lines would be
+ * attributed to whichever product happened to be mid-flight. AsyncLocalStorage
+ * follows the async call chain instead, so a line logged twelve awaits deep
+ * still carries the id of the worker that started that chain.
+ *
+ * The alternative — threading a workerId parameter through every function in
+ * this package — would touch code that has no other reason to know a pool
+ * exists.
+ */
+const workerContext = new AsyncLocalStorage<number>();
+
+/** Run `fn` with everything it logs, however deep, attributed to `workerId`. */
+export function runAsWorker<T>(workerId: number, fn: () => Promise<T>): Promise<T> {
+  return workerContext.run(workerId, fn);
+}
 
 /**
  * Route log output somewhere besides the console — the dashboard's live log
  * viewer, in practice.
  *
- * The sink is module-global, like `verbose`, which is safe only because a batch
- * is scraped by one sequential loop at a time. Pass `null` to detach.
+ * The sink is module-global, like `verbose`. That is safe under a worker pool
+ * because every line arrives tagged with its `workerId`, so a caller can fan the
+ * one stream back out per worker. Pass `null` to detach.
  */
 export function setLogSink(next: LogSink | null): void {
   sink = next;
@@ -35,7 +63,7 @@ export function setLogSink(next: LogSink | null): void {
 /** Emit to the sink first — it must see the line even when `verbose` is off. */
 function emit(level: LogLevel, message: string, consoleWrite: () => void): void {
   try {
-    sink?.(level, message);
+    sink?.(level, message, workerContext.getStore() ?? 0);
   } catch {
     // A broken sink must never take down a scrape.
   }
@@ -85,8 +113,13 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // Runaway guard only. Flipkart caps seller lists well under this; the loop
   // exits on "seller found" or "button gone" long before hitting it.
   maxShowMoreClicks: 40,
-  useNetworkCapture: true,
+  // Zero hits in 1010 recorded products; it only ever cost us response bodies.
+  useNetworkCapture: false,
   preferDirectSellerNavigation: true,
+  // Three concurrent contexts. Measured against a 202-product batch without a
+  // single block; raise it only with the same evidence in hand.
+  concurrency: 3,
+  blockResources: true,
   verbose: true,
   // Zero keeps single-product and small-batch runs exactly as fast as before.
   // Long batches should set --delay; see the note on ScraperOptions.delayMs.
@@ -97,8 +130,23 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   humanLikeBehavior: true,
 };
 
+/**
+ * Fill in every unset option from DEFAULT_OPTIONS.
+ *
+ * Explicitly-undefined keys are dropped before merging, because a plain spread
+ * does not treat them as absent: the CLI builds its options object field by
+ * field, so omitting `--timeout` yields `{ timeout: undefined }`, and
+ * `{ ...DEFAULT_OPTIONS, timeout: undefined }` overwrites the default with
+ * undefined rather than keeping 20_000. That then reaches `waitFor` as
+ * `Date.now() + undefined` — NaN, which no `>=` comparison is ever true for, so
+ * the poll loop never reaches its deadline.
+ */
 export function resolveOptions(options: ScraperOptions = {}): ResolvedOptions {
-  return { ...DEFAULT_OPTIONS, ...options };
+  const provided = Object.fromEntries(
+    Object.entries(options).filter(([, value]) => value !== undefined),
+  ) as ScraperOptions;
+
+  return { ...DEFAULT_OPTIONS, ...provided };
 }
 
 /* ------------------------------------------------------------------ waiting */
@@ -198,10 +246,22 @@ export async function withRetry<T>(
 /**
  * Wait for the page to settle without hanging on Flipkart's long-lived
  * analytics/beacon connections, which mean `networkidle` frequently never fires.
+ *
+ * `load` is opt-in via `waitForLoad`, and callers that have already found the
+ * content they came for should leave it off. It fires only once every subresource
+ * has landed, so on a PDP it is a wait on ~90 product images that no extractor
+ * reads — worth ~1s per product, for a signal we do not use. The real readiness
+ * gate is the caller polling for its own content.
  */
-export async function waitForPageSettled(page: Page, timeoutMs: number): Promise<void> {
+export async function waitForPageSettled(
+  page: Page,
+  timeoutMs: number,
+  waitForLoad = false,
+): Promise<void> {
   await page.waitForLoadState('domcontentloaded', { timeout: timeoutMs }).catch(() => undefined);
-  await page.waitForLoadState('load', { timeout: Math.min(timeoutMs, 10_000) }).catch(() => undefined);
+  if (waitForLoad) {
+    await page.waitForLoadState('load', { timeout: Math.min(timeoutMs, 10_000) }).catch(() => undefined);
+  }
 }
 
 /** Close the login interstitial if it is covering the page. Best-effort. */

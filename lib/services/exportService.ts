@@ -229,6 +229,9 @@ export async function xlsxBuffer(manifest: JobManifest, rows: JobRow[]): Promise
  * on screen is what lands in the file.
  */
 const RECOMMENDATION_COLUMNS: Column<Recommendation>[] = [
+  // Matches the queue export's Index: the upload's own row number, 1-based.
+  { header: 'Index', width: 8, value: (item) => item.index + 1 },
+  { header: 'SKU', width: 18, value: (item) => item.sku },
   { header: 'FSN', width: 20, value: (item) => item.fsn },
   { header: 'Diff Amount', width: 16, value: (item) => round2(item.diffAmount) },
   { header: 'Status', width: 28, value: (item) => item.status },

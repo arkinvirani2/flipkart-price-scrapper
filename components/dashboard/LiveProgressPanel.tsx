@@ -20,23 +20,23 @@ const STEPS: { key: ScrapeStep; label: string }[] = [
 ];
 
 interface Props {
-  progress: LiveProgress | null;
+  /** Every product in flight, one entry per worker. Empty when nothing is running. */
+  progress: LiveProgress[];
   stats: JobStats;
   isRunning: boolean;
 }
 
 export function LiveProgressPanel({ progress, stats, isRunning }: Props) {
-  // Ticks once a second purely so the elapsed timer moves; everything else is
+  // Ticks once a second purely so the elapsed timers move; everything else is
   // event-driven and re-renders only when something actually changes.
   const [, setTick] = useState(0);
+  const active = progress.length > 0;
   useEffect(() => {
-    if (!progress) return;
+    if (!active) return;
     const timer = setInterval(() => setTick((value) => value + 1), 1_000);
     return () => clearInterval(timer);
-  }, [progress]);
+  }, [active]);
 
-  const stepIndex = progress ? STEPS.findIndex((step) => step.key === progress.step) : -1;
-  const stepPercent = stepIndex >= 0 ? ((stepIndex + 1) / STEPS.length) * 100 : 0;
   const overallPercent = stats.total ? (stats.completed / stats.total) * 100 : 0;
 
   return (
@@ -56,7 +56,7 @@ export function LiveProgressPanel({ progress, stats, isRunning }: Props) {
             )}
             aria-hidden
           />
-          {isRunning ? 'Scraping' : 'Idle'}
+          {isRunning ? `Scraping${progress.length > 1 ? ` · ${progress.length} workers` : ''}` : 'Idle'}
         </span>
       </div>
 
@@ -72,48 +72,25 @@ export function LiveProgressPanel({ progress, stats, isRunning }: Props) {
           <Progress value={overallPercent} />
         </div>
 
-        {progress ? (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field icon={Package} label="Current product">
-                <span className="font-medium">{progress.sku || '—'}</span>
-                <span className="ml-2 text-muted-foreground">{progress.fsn}</span>
-              </Field>
-              <Field icon={Store} label="Target seller">
-                {progress.targetSeller}
-              </Field>
-              <Field icon={Clock} label="Elapsed on this product">
-                <span className="tabular">{elapsedSince(progress.startedAt)}</span>
-              </Field>
-              <Field icon={Hourglass} label="Estimated remaining">
-                <span className="tabular">{formatEta(stats.estimatedRemainingMs)}</span>
-              </Field>
-            </div>
+        <div className="flex items-baseline justify-between text-sm">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <Hourglass className="size-3.5" aria-hidden />
+            Estimated remaining
+          </span>
+          <span className="tabular font-medium">{formatEta(stats.estimatedRemainingMs)}</span>
+        </div>
 
-            <div>
-              <div className="mb-1.5 flex items-baseline justify-between text-sm">
-                <span className="text-muted-foreground">Current step</span>
-                <span className="font-medium">
-                  {STEPS[stepIndex]?.label ?? progress.step}
-                  <span className="tabular ml-2 text-xs text-muted-foreground">
-                    {stepIndex + 1}/{STEPS.length}
-                  </span>
-                </span>
-              </div>
-              <Progress value={stepPercent} className="h-1.5" indicatorClassName="bg-status-running" />
-            </div>
-
-            <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs">
-              <div className="flex gap-2">
-                <Chrome className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                <span className="text-muted-foreground">Browser</span>
-                <span className="font-medium capitalize">{progress.browserStatus}</span>
-              </div>
-              <p className="break-all text-muted-foreground" title={progress.productUrl}>
-                {shortenUrl(progress.productUrl, 70)}
-              </p>
-            </div>
-          </>
+        {active ? (
+          // One card per worker, keyed by worker id so a card belongs to the same
+          // worker across renders and does not swap places as products finish.
+          // Past three workers the cards go two-up: ten of them stacked is a
+          // metre of scrolling, and the point of this panel is to take in the
+          // whole pool at a glance.
+          <div className={cn('grid gap-3', progress.length > 3 && 'xl:grid-cols-2')}>
+            {progress.map((live) => (
+              <WorkerCard key={live.workerId} live={live} showLabel={progress.length > 1} />
+            ))}
+          </div>
         ) : (
           <p className="rounded-md bg-muted/40 p-4 text-center text-sm text-muted-foreground">
             {isRunning ? 'Between products…' : 'Nothing running. Start or resume the batch to begin.'}
@@ -127,6 +104,64 @@ export function LiveProgressPanel({ progress, stats, isRunning }: Props) {
         </dl>
       </div>
     </Card>
+  );
+}
+
+/** One worker's current product. */
+function WorkerCard({ live, showLabel }: { live: LiveProgress; showLabel: boolean }) {
+  const stepIndex = STEPS.findIndex((step) => step.key === live.step);
+  const stepPercent = stepIndex >= 0 ? ((stepIndex + 1) / STEPS.length) * 100 : 0;
+
+  return (
+    <div className="space-y-3 rounded-md border p-3">
+      {showLabel && (
+        <div className="flex items-center justify-between">
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Worker {live.workerId + 1}
+          </span>
+          <span className="tabular text-xs text-muted-foreground">{elapsedSince(live.startedAt)}</span>
+        </div>
+      )}
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field icon={Package} label="Current product">
+          <span className="font-medium">{live.sku || '—'}</span>
+          <span className="ml-2 text-muted-foreground">{live.fsn}</span>
+        </Field>
+        <Field icon={Store} label="Target seller">
+          {live.targetSeller}
+        </Field>
+        {!showLabel && (
+          <Field icon={Clock} label="Elapsed on this product">
+            <span className="tabular">{elapsedSince(live.startedAt)}</span>
+          </Field>
+        )}
+      </div>
+
+      <div>
+        <div className="mb-1.5 flex items-baseline justify-between text-sm">
+          <span className="text-muted-foreground">Current step</span>
+          <span className="font-medium">
+            {STEPS[stepIndex]?.label ?? live.step}
+            <span className="tabular ml-2 text-xs text-muted-foreground">
+              {stepIndex + 1}/{STEPS.length}
+            </span>
+          </span>
+        </div>
+        <Progress value={stepPercent} className="h-1.5" indicatorClassName="bg-status-running" />
+      </div>
+
+      <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs">
+        <div className="flex gap-2">
+          <Chrome className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="text-muted-foreground">Browser</span>
+          <span className="font-medium capitalize">{live.browserStatus}</span>
+        </div>
+        <p className="break-all text-muted-foreground" title={live.productUrl}>
+          {shortenUrl(live.productUrl, 70)}
+        </p>
+      </div>
+    </div>
   );
 }
 

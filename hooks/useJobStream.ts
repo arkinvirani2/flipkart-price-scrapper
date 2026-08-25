@@ -8,7 +8,7 @@ export interface JobStream {
   connected: boolean;
   state: JobState | null;
   stats: JobStats | null;
-  progress: LiveProgress | null;
+  progress: LiveProgress[];
   /** Rows that have landed since this stream opened, newest first. */
   recentRows: JobRow[];
   logs: LogEntry[];
@@ -32,7 +32,7 @@ export function useJobStream(jobId: string | null): JobStream {
   const [connected, setConnected] = useState(false);
   const [state, setState] = useState<JobState | null>(null);
   const [stats, setStats] = useState<JobStats | null>(null);
-  const [progress, setProgress] = useState<LiveProgress | null>(null);
+  const [progress, setProgress] = useState<LiveProgress[]>([]);
   const [recentRows, setRecentRows] = useState<JobRow[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const sourceRef = useRef<EventSource | null>(null);

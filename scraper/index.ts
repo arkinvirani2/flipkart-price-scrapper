@@ -40,7 +40,9 @@ interface CliArgs {
   quiet: boolean;
   timeout?: number;
   maxShowMore?: number;
-  noNetwork: boolean;
+  network: boolean;
+  concurrency?: number;
+  noBlockResources: boolean;
   screenshotDir?: string;
   delay?: number;
   jitter?: number;
@@ -52,7 +54,14 @@ interface CliArgs {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { headed: false, quiet: false, noNetwork: false, resume: false, noHuman: false };
+  const args: CliArgs = {
+    headed: false,
+    quiet: false,
+    network: false,
+    noBlockResources: false,
+    resume: false,
+    noHuman: false,
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -69,7 +78,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--quiet': args.quiet = true; break;
       case '--timeout': args.timeout = Number(next()); break;
       case '--max-show-more': args.maxShowMore = Number(next()); break;
-      case '--no-network': args.noNetwork = true; break;
+      case '--network': args.network = true; break;
+      case '--concurrency': args.concurrency = Number(next()); break;
+      case '--no-block-resources': args.noBlockResources = true; break;
       case '--screenshot-dir': args.screenshotDir = next(); break;
       case '--delay': args.delay = Number(next()); break;
       case '--jitter': args.jitter = Number(next()); break;
@@ -112,8 +123,16 @@ Flipkart seller price comparison
     --quiet               Suppress progress logs; print only the JSON result.
     --timeout <ms>        Per-action timeout. Default 20000.
     --max-show-more <n>   Runaway guard on "Show More" clicks. Default 40.
-    --no-network          Skip network payload capture; DOM scraping only.
+    --network             Opt into seller network-payload capture. Off by default:
+                          it resolved 0 of 1010 recorded products and costs a
+                          buffered JSON body per seller-ish response.
     --screenshot-dir <d>  Write a screenshot here when a product fails.
+
+  Speed:
+    --concurrency <n>     Products scraped at once, each in its own context.
+                          Default 3. Use 1 for strictly sequential behaviour.
+    --no-block-resources  Load images, media and fonts too. They are dropped by
+                          default; nothing the scraper reads comes from them.
 
   Batch pacing and recovery:
     --delay <ms>          Pause between products. Default 0. Use ~1500 for 1000+ items.
@@ -132,7 +151,9 @@ function toOptions(args: CliArgs): ScraperOptions {
     verbose: !args.quiet,
     timeout: args.timeout,
     maxShowMoreClicks: args.maxShowMore,
-    useNetworkCapture: !args.noNetwork,
+    useNetworkCapture: args.network,
+    concurrency: args.concurrency,
+    blockResources: !args.noBlockResources,
     screenshotOnFailureDir: args.screenshotDir,
     delayMs: args.delay,
     delayJitterMs: args.jitter,
@@ -189,9 +210,29 @@ async function runBatch(args: CliArgs, options: ScraperOptions): Promise<ScrapeR
 
   // Re-read rather than concatenating in memory: the journal is the record of
   // truth, and it is exactly what a later --resume will see.
-  const all = readJournal(journalPath);
+  //
+  // Sorted back into input order before it becomes the output file. The journal
+  // is written in completion order, which under a worker pool is no longer input
+  // order, and `--out` has always been "the inputs, with results attached". The
+  // journal file itself is deliberately left as-is: its order is its append
+  // history, and resume matches on key rather than position.
+  const all = inInputOrder(readJournal(journalPath), inputs);
   if (!args.quiet) summarize(all, inputs.length, journalPath);
   return all;
+}
+
+/**
+ * Order results the way the inputs file lists them.
+ *
+ * Rows the inputs no longer mention keep their relative order and follow at the
+ * end, so a journal carrying results from an edited inputs file loses nothing.
+ */
+function inInputOrder(results: ScrapeResult[], inputs: ScrapeInput[]): ScrapeResult[] {
+  const rank = new Map(inputs.map((input, index) => [resultKey(input), index]));
+  return results
+    .map((result, index) => ({ result, index, rank: rank.get(resultKey(result)) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((entry) => entry.result);
 }
 
 /** Batch tail: what landed, and the command to finish the rest. */

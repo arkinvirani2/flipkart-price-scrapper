@@ -52,7 +52,7 @@ export async function GET(request: Request, { params }: Context) {
       const record = getJob(jobId);
       if (record) {
         send({ type: 'state', jobId, state: record.manifest.state, stats: computeStats(jobId) });
-        send({ type: 'progress', progress: runner.isActive(jobId) ? runner.progress() : null });
+        send({ type: 'progress', progress: runner.isActive(jobId) ? runner.progress() : [] });
       }
 
       const unsubscribe = subscribe(jobId, send);

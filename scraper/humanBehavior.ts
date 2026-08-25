@@ -75,11 +75,21 @@ function ease(t: number): number {
 /* -------------------------------------------------------------------- state */
 
 /**
- * Last known pointer position, so consecutive visits continue from where the
- * previous one left the cursor instead of teleporting from a fixed origin.
- * Module-scoped like the logger: a batch is scraped by one sequential loop.
+ * Last known pointer position per page, so consecutive gestures continue from
+ * where the previous one left the cursor instead of teleporting from a fixed
+ * origin.
+ *
+ * Keyed by page rather than module-scoped because a worker pool has several
+ * pages alive at once. One shared position would have each worker starting its
+ * moves from wherever another worker's cursor happened to stop — producing
+ * exactly the teleporting, discontinuous path this module exists to avoid.
+ * A WeakMap so a closed page's entry goes away with the page.
  */
-let pointer = { x: FALLBACK_VIEWPORT.width / 2, y: FALLBACK_VIEWPORT.height / 2 };
+const pointers = new WeakMap<Page, { x: number; y: number }>();
+
+function pointerFor(page: Page): { x: number; y: number } {
+  return pointers.get(page) ?? { x: FALLBACK_VIEWPORT.width / 2, y: FALLBACK_VIEWPORT.height / 2 };
+}
 
 /* ------------------------------------------------------------------ actions */
 
@@ -91,7 +101,7 @@ let pointer = { x: FALLBACK_VIEWPORT.width / 2, y: FALLBACK_VIEWPORT.height / 2 
  * scales with distance, and each step gets its own short, varying pause.
  */
 async function moveMouseTo(page: Page, x: number, y: number, signal?: AbortSignal): Promise<void> {
-  const from = pointer;
+  const from = pointerFor(page);
   const distance = Math.hypot(x - from.x, y - from.y);
   const steps = Math.max(8, Math.min(28, Math.round(distance / 22) + randomInt(3, 8)));
 
@@ -117,7 +127,7 @@ async function moveMouseTo(page: Page, x: number, y: number, signal?: AbortSigna
     await delay(randomInt(4, 18), signal);
   }
 
-  pointer = { x, y };
+  pointers.set(page, { x, y });
 }
 
 /** Drift to a random point inside the safe middle band of the viewport. */

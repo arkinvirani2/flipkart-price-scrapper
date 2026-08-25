@@ -25,7 +25,7 @@ export async function GET(_request: Request, { params }: Context) {
   return NextResponse.json({
     job: record.manifest,
     stats: computeStats(jobId),
-    progress: runner.isActive(jobId) ? runner.progress() : null,
+    progress: runner.isActive(jobId) ? runner.progress() : [],
     isActive: runner.isActive(jobId),
     activeJobId: runner.activeJobId(),
   });

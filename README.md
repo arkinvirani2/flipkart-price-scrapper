@@ -90,9 +90,12 @@ This is designed to **run on one long-lived Node host** (your machine, or a cont
 Railway / Render / Fly / a VPS). It is **not deployable to Vercel or any serverless
 platform**: Playwright needs a persistent process and a real Chromium binary, a
 1000-product batch runs for hours (far past any function timeout), and the crash-recovery
-guarantee depends on a durable local disk. One job runs at a time by design — concurrent
-scraping trips Flipkart's bot wall, which is the same reason the CLI is sequential. Keep
-the host awake for the length of a batch.
+guarantee depends on a durable local disk. One *job* runs at a time by design — two
+uncoordinated batches would multiply the request rate with nothing sharing their
+back-offs. Within a job the scraper runs `concurrency` workers (dashboard default 10, the
+maximum; CLI default 3) that share one block gate and are paced per worker. Keep the host
+awake for the length of a batch, and size the host for the pool — ten contexts is roughly
+2 GB of Chromium.
 
 ## Usage
 
@@ -191,7 +194,9 @@ The scraper still attaches an opportunistic response sniffer
 (`attachNetworkCapture`) that watches JSON responses and deep-scans them for objects
 carrying a seller name *and* a price *and* a `sellerId`/`listingId`. If a payload yields
 the target seller, the entire click loop is skipped (`source: "network"`). Otherwise it
-falls back to DOM scraping (`source: "dom"`). Disable with `--no-network`.
+falls back to DOM scraping (`source: "dom"`). **Off by default** — across 13,150 recorded
+products it resolved none of them, while buffering the JSON body of every response whose
+URL merely looked seller-ish. Opt in with `--network`.
 
 If you can capture a HAR while the seller list loads, drop it in and the URL hints in
 `selectors.ts` (`SELLER_API_URL_HINTS`) can be narrowed to the real endpoint — that's the
@@ -274,8 +279,31 @@ silently blend into one output file.
 
 ## Operational notes
 
-- Batch runs are **sequential in one browser** on purpose; parallel tabs against Flipkart
-  invite rate-limiting and captchas.
+- Batch runs use **one browser with `--concurrency` contexts** (CLI default 3, dashboard
+  default 10, hard ceiling `MAX_CONCURRENCY` = 10). Every worker waits on a shared block
+  gate, so a bot wall backs the whole pool off rather than one worker. `--concurrency 1`
+  restores the old strictly-sequential behaviour. N workers means roughly N times the
+  request rate from one address, so a batch that comes back with an unusual number of
+  `SELLER_NOT_FOUND` / `SELLER_LIST_LOAD_FAILED` rows is worth rerunning on a smaller pool
+  before its numbers are trusted.
+- Worker starts are staggered by the run's own `delayMs` (floor `WORKER_RAMP_MS`, 750ms),
+  so a ten-worker pool does not open ten contexts and fire ten navigations at once — that
+  burst is both the most block-prone moment of a run and the worst moment for CPU. The
+  offset also keeps workers out of lockstep for the rest of the batch.
+- Pool size changes one wait, deliberately: `settleSellerCount`'s quiet window scales with
+  `concurrency` (300ms at 3 workers, 1.2s at 10). Every other wait expires into an honest
+  failure that the dashboard can retry; that one expires into an *answer*, and a seller
+  list declared complete while it was merely starved of CPU reads as "this seller does not
+  sell this product" — a wrong number, not a visible failure.
+- Row identity never depends on completion order: results are journalled under
+  `sku + productUrl` and joined back to the uploaded rows by that key, so the Index column
+  in the queue and in the recommendation export is always the uploaded position, whatever
+  order ten workers finish in. `npm run test:pool` is the regression test for that,
+  including the retry path and one SKU listed under two FSNs.
+- Images, media and fonts are dropped before they are fetched (`--no-block-resources`
+  keeps them). CSS and JS are **never** blocked: seller cards mark the struck-through MRP
+  with `line-through`, and `extractSellers` tells it from the selling price by asking
+  `getComputedStyle`. Blocking CSS would silently report MRPs as selling prices.
 - `--screenshot-dir <dir>` writes a screenshot for each failed product.
 - Pass `storageStatePath` if you need a logged-in session.
 - Flipkart's markup differs across A/B buckets and viewports — both known seller layouts

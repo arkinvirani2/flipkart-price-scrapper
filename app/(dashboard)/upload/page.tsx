@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
-import { DEFAULT_JOB_OPTIONS } from '@/types/dashboard';
+import { DEFAULT_JOB_OPTIONS, MAX_CONCURRENCY } from '@/types/dashboard';
 import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
 
 export default function UploadPage() {
@@ -25,8 +25,16 @@ export default function UploadPage() {
     mutationFn: () => api.validateUpload(file!, minimumFile!, account.trim()),
     onSuccess: ({ report: next }) => setReport(next),
   });
+  // Fixed at creation, because it is stored on the manifest and a resumed run
+  // reads it back from there — a batch scrapes with the pool it was made with.
+  const [workers, setWorkers] = useState(DEFAULT_JOB_OPTIONS.concurrency);
   const create = useMutation({
-    mutationFn: () => api.createJob({ name, accountName: account.trim(), rows: report?.rows ?? [], options: DEFAULT_JOB_OPTIONS }),
+    mutationFn: () => api.createJob({
+      name,
+      accountName: account.trim(),
+      rows: report?.rows ?? [],
+      options: { ...DEFAULT_JOB_OPTIONS, concurrency: workers },
+    }),
     onSuccess: ({ job }) => router.push(`/jobs/${job.id}`),
   });
 
@@ -38,6 +46,19 @@ export default function UploadPage() {
     <Button onClick={() => validate.mutate()} disabled={!file || !minimumFile || !account.trim() || validate.isPending}>{validate.isPending ? <Loader2 className="animate-spin" /> : <Play />} Validate table</Button>
     {validate.isError && <Alert variant="destructive"><AlertTitle>Upload failed</AlertTitle><AlertDescription>{(validate.error as Error).message}</AlertDescription></Alert>}
     {report && <ValidationReport report={report} />}
-    {report?.ok && <div className="space-y-3 rounded-lg border p-4"><Label htmlFor="name">Batch name</Label><Input id="name" value={name} onChange={(event) => setName(event.target.value)} /><Button className="w-full" onClick={() => create.mutate()} disabled={create.isPending}>{create.isPending ? <Loader2 className="animate-spin" /> : <Play />} Create batch</Button></div>}
+    {report?.ok && <div className="space-y-3 rounded-lg border p-4">
+      <Label htmlFor="name">Batch name</Label>
+      <Input id="name" value={name} onChange={(event) => setName(event.target.value)} />
+      <Label htmlFor="workers">Workers</Label>
+      <Input id="workers" type="number" min={1} max={MAX_CONCURRENCY} value={workers}
+        onChange={(event) => setWorkers(Math.min(MAX_CONCURRENCY, Math.max(1, Math.trunc(Number(event.target.value)) || 1)))} />
+      <p className="text-xs text-muted-foreground">
+        Products scraped at once, each in its own browser window — {MAX_CONCURRENCY} is the maximum.
+        More workers finish the batch faster and put proportionally more traffic on Flipkart from one
+        address, so if a batch comes back with an unusual number of failures, rerun the failed rows on
+        a smaller pool before trusting the result.
+      </p>
+      <Button className="w-full" onClick={() => create.mutate()} disabled={create.isPending}>{create.isPending ? <Loader2 className="animate-spin" /> : <Play />} Create batch</Button>
+    </div>}
   </div>;
 }

@@ -11,6 +11,8 @@
 import type { Locator, Page, Response } from 'playwright';
 import {
   DOM_EXTRACTION_SELECTORS,
+  SEE_OTHER_SELLERS,
+  SEE_OTHER_SELLERS_TEXT,
   SELLER_API_URL_HINTS,
   SHOW_MORE,
   SHOW_MORE_TEXT,
@@ -19,7 +21,7 @@ import {
 } from './selectors';
 import { extractSellersFromJson, findSeller, parsePrice, sellerNamesMatch } from './parser';
 import type { ResolvedOptions, SellerCard } from './types';
-import { ScrapeError, dismissOverlays, log, waitFor, waitForPageSettled, withRetry } from './utils';
+import { ScrapeError, delay, dismissOverlays, log, waitFor, waitForPageSettled, withRetry } from './utils';
 import type { SellerListEntry } from './productPage';
 
 /* ----------------------------------------------------------- network capture */
@@ -101,10 +103,28 @@ export async function openSellerDrawer(
   };
 
   const clickThrough = async (): Promise<boolean> => {
-    if (!entry.link) return false;
+    // A Locator resolves against whatever page is loaded when it is used, not
+    // against the page it was created from. If direct navigation already ran and
+    // failed, we are sitting on /sellers, where the PDP's link does not exist —
+    // so come home before looking for it.
+    if (!page.url().includes(entry.productUrl) && entry.productUrl !== page.url()) {
+      const returned = await page
+        .goto(entry.productUrl, { waitUntil: 'domcontentloaded', timeout: options.navigationTimeout })
+        .then(() => true)
+        .catch(() => false);
+      if (!returned) return false;
+      await dismissOverlays(page);
+    }
+
+    // The entry may carry no locator at all — a batch derives the seller URL
+    // straight from its known FSN and never queries the PDP for a link. Look for
+    // one now that we are back on the product page.
+    const link = entry.link ?? (await firstSellerLinkOn(page));
+    if (!link) return false;
+
     log.info('clicking "See other sellers"');
-    await entry.link.scrollIntoViewIfNeeded().catch(() => undefined);
-    await entry.link.click({ timeout: options.timeout });
+    await link.scrollIntoViewIfNeeded().catch(() => undefined);
+    await link.click({ timeout: options.timeout });
     await waitForPageSettled(page, options.navigationTimeout);
     await dismissOverlays(page);
     return (await waitForSellerList(page, options)) > 0;
@@ -124,21 +144,100 @@ export async function openSellerDrawer(
   }
 }
 
+/** The "See other sellers" control on the page as it stands now, if there is one. */
+async function firstSellerLinkOn(page: Page): Promise<Locator | null> {
+  const byHref = page.locator(anyOf(SEE_OTHER_SELLERS)).first();
+  if ((await byHref.count()) > 0) return byHref;
+
+  const byText = page.getByText(SEE_OTHER_SELLERS_TEXT).first();
+  if ((await byText.count()) > 0) return byText;
+
+  return null;
+}
+
 /**
- * Block until at least one seller card exists. Returns how many rendered, or 0
- * on timeout. This is what makes the drawer "fully rendered" check real rather
- * than a guessed sleep — spinners simply keep the count at zero until content
- * lands.
+ * Block until the seller list has finished rendering. Returns how many cards
+ * ended up on the page, or 0 on timeout.
+ *
+ * Two waits, and the second one matters as much as the first:
+ *
+ *   1. At least one card exists. Spinners keep the count at zero until content
+ *      lands, so this is a real readiness check rather than a guessed sleep.
+ *
+ *   2. The count has stopped climbing. Flipkart streams long seller lists in
+ *      chunks, so "some cards are present" is NOT "all cards are present". A
+ *      45-seller listing was observed rendering 38 cards, and a scrape that read
+ *      the list at that moment reported the target seller as absent — a wrong
+ *      answer, indistinguishable from a genuinely delisted seller.
+ *
+ * This second wait used to happen by accident: the page also had ~90 images in
+ * flight, and the time they took was enough for the remaining cards to arrive.
+ * Dropping those images removed the delay and exposed the missing wait, so it is
+ * now explicit. It costs a few hundred milliseconds on a list that is already
+ * complete, which is the correct price for never truncating one that is not.
  */
 export async function waitForSellerList(page: Page, options: ResolvedOptions): Promise<number> {
-  const count = await waitFor(
+  const first = await waitFor(
     async () => {
       const sellers = await extractSellers(page);
       return sellers.length > 0 ? sellers.length : null;
     },
     { timeoutMs: options.timeout, description: 'seller cards' },
   );
-  return count ?? 0;
+  if (!first) return 0;
+
+  return settleSellerCount(page, first, options);
+}
+
+/** Poll until the card count holds still, and return the highest count seen. */
+async function settleSellerCount(
+  page: Page,
+  startingCount: number,
+  options: ResolvedOptions,
+): Promise<number> {
+  const POLL_MS = 150;
+  /**
+   * Consecutive quiet polls before the list counts as done growing.
+   *
+   * Scaled by pool size, and this is the reason the scraper knows how many
+   * workers it has at all. Every worker's context competes for the same CPU, so
+   * a chunk of cards that lands within 300ms on an idle machine can stall
+   * longer than that with ten contexts rendering at once. Every other wait in
+   * this file expires into a *failure* — an honest one, retryable from the
+   * dashboard. This one expires into an *answer*: a list declared complete when
+   * it was merely starved reads as "the seller is not selling this product",
+   * which is indistinguishable from the truth and lands in the recommendations
+   * as fact. So it is the wait that gets the slack when the pool is wide.
+   *
+   * Three workers keeps the original 300ms exactly; ten gets 1.2s.
+   */
+  const QUIET_POLLS = 2 * Math.max(1, Math.ceil((options.concurrency || 1) / 3));
+
+  let best = startingCount;
+  let quiet = 0;
+  // Capped well under the action timeout: this is a settling window, not a wait
+  // for content that may never come — the content is already on screen. The cap
+  // has to clear the quiet window itself, or a wide pool would hit the deadline
+  // before it could ever record a quiet stretch.
+  const deadline = Date.now() + Math.min(options.timeout, Math.max(5_000, POLL_MS * QUIET_POLLS * 3));
+
+  while (Date.now() < deadline) {
+    await delay(POLL_MS, options.signal);
+    if (options.signal?.aborted) break;
+
+    const current = (await extractSellers(page).catch(() => [])).length;
+    if (current > best) {
+      best = current;
+      quiet = 0;
+      continue;
+    }
+    if (++quiet >= QUIET_POLLS) break;
+  }
+
+  if (best > startingCount) {
+    log.info(`seller list grew from ${startingCount} to ${best} while settling`);
+  }
+  return best;
 }
 
 /* ------------------------------------------------------------ DOM extraction */
@@ -344,6 +443,17 @@ export async function clickShowMoreUntilSellerFound(
     log.step(`Seller not found... (${sellers.length} sellers scanned)`);
 
     if (!(await showMoreIsActionable(page))) {
+      // "Not found" is a claim about the whole list, so it may only be made
+      // about a list that has stopped growing. Cards can still be streaming in
+      // here — after a "Show More" the loop resumes as soon as the count ticks
+      // up by one, not when that chunk has finished rendering.
+      const settled = await settleSellerCount(page, sellers.length, options);
+      if (settled > sellers.length) {
+        sellers = await extractSellers(page);
+        lastCount = sellers.length;
+        continue;
+      }
+
       log.info('no "Show More" control remains — seller list is exhausted');
       return { seller: null, sellers, sellersScanned: sellers.length, showMoreClicks };
     }

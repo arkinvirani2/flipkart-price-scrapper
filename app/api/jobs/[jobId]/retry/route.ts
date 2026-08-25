@@ -8,10 +8,11 @@
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { computeStats, getJob, requeueRows } from '@/lib/store/jobStore';
+import { computeStats, getJob, requeueRows, setJobState } from '@/lib/store/jobStore';
 import { getRunner } from '@/lib/runner/jobRunner';
 import { appendLog } from '@/lib/store/logStore';
 import { publish } from '@/lib/runner/eventBus';
+import { ACTIVE_STATES, RESUMABLE_STATES, type JobState } from '@/types/dashboard';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -51,12 +52,29 @@ export async function POST(request: Request, { params }: Context) {
   }
 
   const requeued = requeueRows(jobId, parsed.data.indexes);
+  let state: JobState = getJob(jobId)?.manifest.state ?? 'queued';
+
+  if (requeued > 0) {
+    // A finished batch has work again, so it cannot stay in a terminal state:
+    // the dashboard only offers Start/Resume from a resumable one, and would
+    // otherwise leave the user with rows to scrape and no way to scrape them.
+    // 'stopped' is the honest description — unfinished work, runner not ours.
+    if (!RESUMABLE_STATES.includes(state) && !ACTIVE_STATES.includes(state)) {
+      setJobState(jobId, 'stopped', { finishedAt: undefined });
+      state = 'stopped';
+    }
+  }
+
   const stats = computeStats(jobId);
 
   if (requeued > 0) {
     const entry = appendLog(jobId, 'info', `${requeued} product(s) requeued for another attempt.`);
     publish(jobId, { type: 'log', entry });
+    // The stream is what the dashboard trusts for state and stats once it is
+    // connected, so a requeue that only rewrote the journal would leave every
+    // open tab showing a completed batch with nothing pending.
+    publish(jobId, { type: 'state', jobId, state, stats });
   }
 
-  return NextResponse.json({ requeued, stats });
+  return NextResponse.json({ requeued, state, stats });
 }

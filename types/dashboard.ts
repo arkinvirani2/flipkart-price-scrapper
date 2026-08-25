@@ -40,6 +40,19 @@ export const ACTIVE_STATES: readonly JobState[] = ['running', 'pausing', 'stoppi
 
 export type RowStatus = 'pending' | 'running' | 'success' | 'failed' | 'paused' | 'cancelled';
 
+/**
+ * The most workers a batch may run.
+ *
+ * Ten contexts is what one Chromium instance and one residential IP take
+ * without the pool starving itself: every worker owns a context, and contexts
+ * compete for the same CPU, so past this the page-render waits inside the
+ * scraper start expiring on machine load rather than on Flipkart being slow.
+ * The scraper compensates for pool size where a starved wait would produce a
+ * *wrong* answer (see settleSellerCount), but that compensation costs time and
+ * has a limit; this is it.
+ */
+export const MAX_CONCURRENCY = 10;
+
 /** The subset of ScraperOptions a dashboard user is allowed to set per job. */
 export interface JobOptions {
   delayMs: number;
@@ -47,6 +60,10 @@ export interface JobOptions {
   timeout: number;
   blockBackoffMs: number;
   blockRetries: number;
+  /** Products scraped at once, each in its own browser context. 1 = sequential. */
+  concurrency: number;
+  /** Drop images, media and fonts. Never blocks CSS — prices depend on it. */
+  blockResources: boolean;
   useNetworkCapture: boolean;
   /** Local-only convenience: watch the browser work. Useless on a headless host. */
   headed: boolean;
@@ -54,13 +71,21 @@ export interface JobOptions {
 
 export const DEFAULT_JOB_OPTIONS: JobOptions = {
   // 1500ms is the pacing the scraper's own docs recommend for large batches;
-  // defaulting to it means the dashboard is polite out of the box.
+  // defaulting to it means the dashboard is polite out of the box. Note that
+  // this is per worker, so the pool's aggregate request rate is roughly
+  // `concurrency` times what a single worker would produce — at the default
+  // pool that is a product every ~150ms, which is why the delay is not lowered
+  // to buy speed. Speed comes from the pool; the delay is what keeps it from
+  // reading as a burst.
   delayMs: 1500,
   delayJitterMs: 400,
   timeout: 20_000,
   blockBackoffMs: 60_000,
   blockRetries: 3,
-  useNetworkCapture: true,
+  concurrency: MAX_CONCURRENCY,
+  blockResources: true,
+  // Zero hits in 1010 recorded products; opt in only if Flipkart ships an API.
+  useNetworkCapture: false,
   headed: false,
 };
 
@@ -182,6 +207,8 @@ export interface JobStats {
 /** What the runner is doing right now. Absent when nothing is running. */
 export interface LiveProgress {
   jobId: string;
+  /** Which worker owns this product. 0 when running sequentially. */
+  workerId: number;
   rowIndex: number;
   sku: string;
   fsn: string;
@@ -215,7 +242,10 @@ export interface LogEntry {
 /** Server-sent event payloads. One union so the client can switch exhaustively. */
 export type JobEvent =
   | { type: 'state'; jobId: string; state: JobState; stats: JobStats }
-  | { type: 'progress'; progress: LiveProgress | null }
+  // An array, not a single slot: with a worker pool there are several products
+  // in flight at once, and collapsing them onto one slot would show whichever
+  // worker reported last while hiding the other two.
+  | { type: 'progress'; progress: LiveProgress[] }
   | { type: 'row'; jobId: string; row: JobRow; stats: JobStats }
   | { type: 'log'; entry: LogEntry }
   | { type: 'heartbeat'; ts: string };

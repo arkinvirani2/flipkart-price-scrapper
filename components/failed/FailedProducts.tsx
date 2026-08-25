@@ -87,7 +87,10 @@ export function FailedProducts({ jobId, canRetry }: Props) {
       {retry.isSuccess && (
         <Alert variant="success">
           <AlertTitle>{retry.data.requeued} product(s) moved back to pending</AlertTitle>
-          <AlertDescription>Resume the batch to scrape them again.</AlertDescription>
+          <AlertDescription>
+            The batch now has {retry.data.stats.pending} pending — press Resume at the top of the
+            page to scrape them again.
+          </AlertDescription>
         </Alert>
       )}
 

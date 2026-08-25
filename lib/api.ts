@@ -9,6 +9,7 @@ import type {
   JobManifest,
   JobOptions,
   JobRow,
+  JobState,
   JobStats,
   LiveProgress,
   LogEntry,
@@ -80,7 +81,7 @@ export const api = {
     request<{
       job: JobManifest;
       stats: JobStats;
-      progress: LiveProgress | null;
+      progress: LiveProgress[];
       isActive: boolean;
       activeJobId: string | null;
     }>(`/api/jobs/${jobId}`),
@@ -143,7 +144,7 @@ export const api = {
   },
 
   retryRows: (jobId: string, indexes: number[]) =>
-    request<{ requeued: number }>(`/api/jobs/${jobId}/retry`, {
+    request<{ requeued: number; state: JobState; stats: JobStats }>(`/api/jobs/${jobId}/retry`, {
       method: 'POST',
       body: JSON.stringify({ indexes }),
     }),

@@ -8,7 +8,10 @@ import { jobPaths } from '@/lib/store/paths';
 // this discards recommendation files written by the old, wrongly-signed maths.
 // 5: finalBankSettlement added, so files written before the field existed are
 // discarded rather than loaded back without it.
-export const RECOMMENDATION_SCHEMA = 5;
+// 6: index and sku added. Files written before these existed would render an
+// empty Index column and give React a duplicate-free but meaningless key, so
+// they are discarded and regenerated from the rows rather than loaded back.
+export const RECOMMENDATION_SCHEMA = 6;
 
 export interface RecommendationFile {
   schema: number;

@@ -170,6 +170,52 @@ export const DOM_EXTRACTION_SELECTORS = {
 
 export type DomExtractionSelectors = typeof DOM_EXTRACTION_SELECTORS;
 
+/* --------------------------------------------------------- resource blocking */
+
+/**
+ * Playwright resource types dropped before they are fetched.
+ *
+ * Nothing in this scraper reads a pixel: prices come from JSON-LD and from text
+ * nodes, and a PDP ships ~90 images. Dropping them is the single largest saving
+ * available and cannot change an extracted value.
+ *
+ * `stylesheet` and `script` are deliberately ABSENT and must stay absent.
+ * Seller cards mark the struck-through MRP with `text-decoration: line-through`
+ * supplied by Flipkart's external CSS bundles, and `extractSellers` tells the
+ * MRP from the selling price by asking `getComputedStyle`. With CSS blocked
+ * that check silently returns false for every row and the scraper starts
+ * reporting MRPs as selling prices — a wrong number, not a visible failure.
+ */
+export const BLOCKED_RESOURCE_TYPES: readonly string[] = ['image', 'media', 'font'];
+
+/**
+ * Third-party hosts dropped wholesale — analytics, ads and session replay.
+ *
+ * These serve no markup the scraper reads, and each one is a DNS lookup plus a
+ * TLS handshake competing with the fetches that matter. Flipkart's own asset
+ * host (static-assets-web.flixcart.com) is NOT here: it serves the CSS bundles
+ * the line-through check depends on.
+ */
+export const BLOCKED_HOSTS: readonly string[] = [
+  'google-analytics.com',
+  'googletagmanager.com',
+  'googlesyndication.com',
+  'doubleclick.net',
+  'googleadservices.com',
+  'facebook.net',
+  'facebook.com',
+  'connect.facebook.net',
+  'hotjar.com',
+  'clarity.ms',
+  'newrelic.com',
+  'nr-data.net',
+  'branch.io',
+  'appsflyer.com',
+  'criteo.com',
+  'crwdcntrl.net',
+  'scorecardresearch.com',
+];
+
 /** Build the canonical seller-list URL for a product id (FSN). */
 export function sellersUrlForPid(pid: string): string {
   return `https://www.flipkart.com/sellers?pid=${encodeURIComponent(pid)}`;
