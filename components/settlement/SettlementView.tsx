@@ -1,10 +1,11 @@
 'use client';
 
-import { CircleCheck, CircleHelp, Equal, FileSpreadsheet, List, TrendingDown } from 'lucide-react';
-import { useMemo } from 'react';
+import { CircleCheck, CircleHelp, Equal, FileSpreadsheet, List, Search, TrendingDown, X } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { EMPTY_FILTERS } from '@/components/queue/FilterBar';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -131,6 +132,7 @@ const ALL_COLUMNS = [...BASE_COLUMNS, CATEGORY_COLUMN, REASON_COLUMN];
 export function SettlementView({ jobId }: { jobId: string }) {
   const rowsQuery = useJobRows(jobId, EMPTY_FILTERS);
   const rows = rowsQuery.data?.rows;
+  const [fsnSearch, setFsnSearch] = useState('');
 
   const { all, main, below, equal, review } = useMemo(() => {
     const all: SettlementRow[] = [];
@@ -150,6 +152,22 @@ export function SettlementView({ jobId }: { jobId: string }) {
 
     return { all, main, below, equal, review };
   }, [rows]);
+
+  // The All tab's own FSN filter. Comma-separated: each term is matched on its
+  // own and a row survives if any term is in its FSN, so pasting a column of
+  // FSNs pulls exactly those listings up. An empty box means no filtering at
+  // all — the tab stays the full, input-ordered list it was.
+  const filteredAll = useMemo(() => {
+    const terms = fsnSearch
+      .split(',')
+      .map((term) => term.trim().toLowerCase())
+      .filter(Boolean);
+    if (terms.length === 0) return all;
+    return all.filter((entry) => {
+      const fsn = entry.row.fsn.toLowerCase();
+      return terms.some((term) => fsn.includes(term));
+    });
+  }, [all, fsnSearch]);
 
   if (rowsQuery.isLoading && !rows) {
     return <Skeleton className="h-96 w-full" />;
@@ -237,7 +255,32 @@ export function SettlementView({ jobId }: { jobId: string }) {
               </TooltipContent>
             </Tooltip>
           </div>
-          <SettlementTable rows={all} columns={ALL_COLUMNS} emptyMessage="No rows in this job yet." />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-64 flex-1">
+              <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={fsnSearch}
+                onChange={(event) => setFsnSearch(event.target.value)}
+                placeholder="Search FSN — comma-separate to look up several at once…"
+                className="pl-8"
+              />
+            </div>
+            {fsnSearch.trim() !== '' && (
+              <>
+                <span className="tabular text-xs text-muted-foreground">
+                  {filteredAll.length} of {all.length}
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setFsnSearch('')}>
+                  <X /> Clear
+                </Button>
+              </>
+            )}
+          </div>
+          <SettlementTable
+            rows={filteredAll}
+            columns={ALL_COLUMNS}
+            emptyMessage={fsnSearch.trim() === '' ? 'No rows in this job yet.' : 'No rows match that FSN search.'}
+          />
         </TabsContent>
       </Tabs>
     </div>
