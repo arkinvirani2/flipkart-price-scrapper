@@ -80,6 +80,9 @@ const BASE_COLUMNS: SettlementColumn[] = [
     header: 'Difference',
     width: 6,
     align: 'right',
+    // Sortable in every list — a null difference (a row that can't be
+    // evaluated) always sorts to the bottom.
+    sortValue: ({ settlement }) => settlement.difference,
     cell: ({ settlement }) => <span className={signClass(settlement.difference)}>{formatSignedNumber(settlement.difference)}</span>,
   },
   {
