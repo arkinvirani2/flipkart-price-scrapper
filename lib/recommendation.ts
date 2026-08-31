@@ -44,6 +44,31 @@ export interface Recommendation {
   reason: string | null;
 }
 
+/**
+ * A current bank settlement that already sits under the SKU's Minimum Bank
+ * Settlement is a broken starting point, not a verdict: scoring from it would
+ * judge the row against a base the business would never leave standing. So the
+ * floor is applied first — the current settlement is lifted to the minimum —
+ * and the row is then scored by the existing rules, unchanged, on top of that
+ * lifted base. A row already at or above its minimum comes back untouched, and
+ * so does one missing either value, so nothing that used to be scored is scored
+ * differently.
+ */
+function withMinimumFloor(row: JobRow): JobRow {
+  const current = row.currentBankSettlement;
+  const minimum = row.bankSettlementThreshold;
+  if (
+    current === undefined ||
+    minimum === undefined ||
+    !Number.isFinite(current) ||
+    !Number.isFinite(minimum) ||
+    current >= minimum
+  ) {
+    return row;
+  }
+  return { ...row, currentBankSettlement: minimum };
+}
+
 /** Every row is scored, so a status is never absent — see RecommendationStatus. */
 function unevaluated(row: JobRow, status: RecommendationStatus, reason: string): Recommendation {
   return {
@@ -66,7 +91,10 @@ function unevaluated(row: JobRow, status: RecommendationStatus, reason: string):
  * the scraper's own `difference` is stored the other way round and must not be
  * used here.
  */
-export function buildRecommendation(row: JobRow): Recommendation {
+export function buildRecommendation(input: JobRow): Recommendation {
+  // Everything below — `unevaluated` included — reads the floored row, so the
+  // lift happens exactly once and no later step can see the sub-minimum value.
+  const row = withMinimumFloor(input);
   const settlement = computeSettlement(row);
   const result = row.result;
 

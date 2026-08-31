@@ -117,6 +117,49 @@ function priced(ourPrice: number, winnerPrice: number, overrides: Partial<JobRow
   }
 }
 
+/* ------------------------- Case F — current settlement below the minimum */
+// The floor runs before anything else: a current settlement of 90 against a
+// ₹100 minimum is lifted to 100 first, and only then is the row scored.
+{
+  // ₹10 cheaper than the buy box. From the raw 90 the final would be 100 —
+  // equal to the minimum and therefore Not Safe. From the floored 100 it is
+  // 110, which clears it.
+  const input = priced(150, 160, { currentBankSettlement: 90, bankSettlementThreshold: 100 });
+  const recommendation = buildRecommendation(input);
+  assert.equal(recommendation.diffAmount, 10);
+  assert.equal(recommendation.status, 'Safe');
+  assert.equal(recommendation.finalBankSettlement, 110, 'scored from the lifted 100, not the raw 90');
+
+  // Lifting the base does not turn a losing row into a passing one: ₹22 dear
+  // still breaks the minimum, so the call stays Not Safe — reported on the
+  // floored settlement, which is where the row now stands.
+  const dear = buildRecommendation(priced(163, 141, { currentBankSettlement: 90, bankSettlementThreshold: 100 }));
+  assert.equal(dear.status, 'Not Safe');
+  assert.equal(dear.finalBankSettlement, 100);
+
+  // A row that could not be scored is still reported on the floored settlement.
+  const pending = buildRecommendation(
+    priced(150, 160, { currentBankSettlement: 90, bankSettlementThreshold: 100, status: 'pending', result: undefined }),
+  );
+  assert.equal(pending.status, 'Need Review');
+  assert.equal(pending.finalBankSettlement, 100);
+
+  // The floor never lowers anything: a settlement already above its minimum is
+  // scored exactly as it was before this step existed.
+  const above = priced(150, 130, { currentBankSettlement: 121, bankSettlementThreshold: 100 });
+  assert.equal(buildRecommendation(above).finalBankSettlement, 101);
+  assert.equal(buildRecommendation(above).status, 'Safe');
+
+  // With no minimum there is nothing to floor to, and the row keeps its own
+  // current settlement.
+  const noMinimum = buildRecommendation(priced(150, 160, { currentBankSettlement: 90, bankSettlementThreshold: undefined }));
+  assert.equal(noMinimum.status, 'Threshold Missing');
+  assert.equal(noMinimum.finalBankSettlement, 90);
+
+  // The caller's row is left alone — the lift is local to the recommendation.
+  assert.equal(input.currentBankSettlement, 90, 'buildRecommendation does not mutate its input');
+}
+
 /* ------------------------------------------------- preserved existing coverage */
 // We are ₹6 cheaper than the buy box, so the settlement rises: 119 + 6 = 125 > 115.
 assert.deepEqual(buildRecommendation(row({})), { key: 'x', index: 0, sku: 'x', fsn: 'FSN', diffAmount: 6, status: 'Safe', finalBankSettlement: 125, reason: null });
@@ -136,7 +179,12 @@ assert.deepEqual(buildRecommendation(row({})), { key: 'x', index: 0, sku: 'x', f
   assert.equal(level.finalBankSettlement, 119);
 }
 // Not Safe outranks the 20% band: breaking the minimum is the more serious call.
-assert.equal(buildRecommendation(priced(100, 130, { currentBankSettlement: 119, bankSettlementThreshold: 160 })).status, 'Not Safe');
+// The base must start at or above its minimum for this to be the precedence
+// being tested — a sub-minimum base is lifted by the floor first (Case F), so
+// it would no longer reach here with the settlement it was written for.
+// ₹30 dear on a ₹100 price is over the band, and 119 − 30 = 89 breaks the ₹100
+// minimum, so Not Safe wins.
+assert.equal(buildRecommendation(priced(100, 70, { currentBankSettlement: 119, bankSettlementThreshold: 100 })).status, 'Not Safe');
 
 /* ------------------------------------------------- row-to-input mapping */
 // Every recommendation carries its row's own index and sku, whatever the row's
