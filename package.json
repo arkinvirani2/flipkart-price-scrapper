@@ -3,20 +3,23 @@
   "version": "1.0.0",
   "private": true,
   "description": "Flipkart seller price comparison — Playwright scraper plus a Next.js control dashboard.",
-  "main": "dist/scraper/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:recommendation": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/recommendation.test.ts",
-    "test:pool": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/pool.test.ts",
+    "typecheck:scraper": "tsc -p tsconfig.scraper.json --noEmit",
+    "typecheck:worker": "tsc -p tsconfig.worker.json --noEmit",
+    "worker": "ts-node -T -r tsconfig-paths/register --project tsconfig.worker.json worker/index.ts",
     "scrape": "ts-node --project tsconfig.scraper.json scraper/index.ts",
     "verify": "ts-node -T --project tsconfig.scraper.json scraper/verify.ts",
     "build:scraper": "tsc -p tsconfig.scraper.json",
-    "typecheck:scraper": "tsc -p tsconfig.scraper.json --noEmit",
-    "postinstall": "playwright install chromium",
+    "test:store": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/store.test.ts",
+    "test:recommendation": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/recommendation.test.ts",
     "test:width": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/poolWidth.test.ts"
   },
   "dependencies": {
@@ -35,6 +38,7 @@
     "@radix-ui/react-tabs": "^1.1.2",
     "@radix-ui/react-toast": "^1.2.4",
     "@radix-ui/react-tooltip": "^1.1.6",
+    "@supabase/supabase-js": "~2.74.0",
     "@tanstack/react-query": "^5.62.11",
     "@tanstack/react-virtual": "^3.11.2",
     "class-variance-authority": "^0.7.1",
@@ -43,7 +47,6 @@
     "exceljs": "^4.4.0",
     "lucide-react": "^0.469.0",
     "next": "^15.5.20",
-    "playwright": "^1.49.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-hook-form": "^7.54.2",
@@ -61,11 +64,14 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "autoprefixer": "^10.4.20",
+    "dotenv": "^16.6.1",
     "eslint": "^8.57.1",
     "eslint-config-next": "^15.5.20",
+    "playwright": "^1.49.0",
     "postcss": "^8.5.10",
     "tailwindcss": "^3.4.17",
     "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.2"
   }
 }

@@ -1,9 +1,11 @@
 /**
  * GET /api/jobs/:jobId/recommendations/export?format=csv|xlsx
  *
- * Exports the first tab — Price change (Diff) — and nothing else. An optional
- * `search` narrows it to what the user had on screen, so the file matches the
- * table it was downloaded from.
+ * Exports the first tab — Price change (Diff) — and nothing else.
+ *
+ * The docblock here used to promise an optional `search` that narrowed the file
+ * to what the user had on screen. No such parameter was ever read, so the
+ * promise is removed rather than left standing: the export is the whole set.
  */
 
 import { NextResponse } from 'next/server';
@@ -14,7 +16,6 @@ import {
 } from '@/lib/services/exportService';
 import { ensureRecommendations } from '@/lib/services/recommendations';
 import { getJob } from '@/lib/store/jobStore';
-import type { Recommendation } from '@/lib/recommendation';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -23,40 +24,39 @@ type Context = { params: Promise<{ jobId: string }> };
 
 export async function GET(request: Request, { params }: Context) {
   const { jobId } = await params;
-  const record = getJob(jobId);
-  if (!record) return NextResponse.json({ error: 'Job not found.' }, { status: 404 });
-
-  const file = ensureRecommendations(jobId);
-  if (!file) return NextResponse.json({ error: 'No recommendations for this job.' }, { status: 404 });
+  const manifest = await getJob(jobId);
+  if (!manifest) return NextResponse.json({ error: 'Job not found.' }, { status: 404 });
 
   const url = new URL(request.url);
   const format = (url.searchParams.get('format') ?? 'xlsx').toLowerCase();
-  const rows = file.recommendations;
+
+  if (format !== 'csv' && format !== 'xlsx') {
+    return NextResponse.json({ error: 'format must be csv or xlsx.' }, { status: 400 });
+  }
+
+  const file = await ensureRecommendations(jobId);
+  if (!file) return NextResponse.json({ error: 'No recommendations for this job.' }, { status: 404 });
 
   if (format === 'csv') {
-    return new Response(recommendationCsvStream(rows), {
+    return new Response(recommendationCsvStream(file.recommendations), {
       headers: {
         'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${exportFilename(record.manifest, 'csv', 'price-change')}"`,
+        'Content-Disposition': `attachment; filename="${exportFilename(manifest, 'csv', 'price-change')}"`,
       },
     });
   }
 
-  if (format === 'xlsx') {
-    const buffer = await recommendationXlsxBuffer(record.manifest, rows, {
-      accountName: file.accountName,
-      generatedAt: file.generatedAt,
-      summary: file.summary,
-    });
+  const buffer = await recommendationXlsxBuffer(manifest, file.recommendations, {
+    accountName: file.accountName,
+    generatedAt: file.generatedAt,
+    summary: file.summary,
+  });
 
-    return new Response(new Uint8Array(buffer), {
-      headers: {
-        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename="${exportFilename(record.manifest, 'xlsx', 'price-change')}"`,
-        'Content-Length': String(buffer.length),
-      },
-    });
-  }
-
-  return NextResponse.json({ error: 'format must be csv or xlsx.' }, { status: 400 });
+  return new Response(new Uint8Array(buffer), {
+    headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${exportFilename(manifest, 'xlsx', 'price-change')}"`,
+      'Content-Length': String(buffer.length),
+    },
+  });
 }

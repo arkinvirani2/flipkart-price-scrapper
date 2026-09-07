@@ -170,8 +170,32 @@ export interface ScraperOptions {
   /** Playwright storageState path, for a logged-in session if you need one. */
   storageStatePath?: string;
   userAgent?: string;
-  /** Screenshot destination on failure. */
+  /**
+   * Screenshot destination on failure.
+   *
+   * The dashboard's worker leaves this unset. It runs on a GitHub Actions
+   * runner whose filesystem is destroyed when the job ends, so a screenshot
+   * written there could only ever be a dead path in the results. The CLI still
+   * sets it, because a local run has a disk that outlives it.
+   */
   screenshotOnFailureDir?: string;
+
+  /**
+   * Route Chromium through an HTTP/SOCKS proxy.
+   *
+   * Unset means direct, which is what a local run wants. It exists for the
+   * GitHub Actions worker: Flipkart rate-limits and bot-walls by IP, and
+   * Actions runners come from Azure datacentre ranges that e-commerce sites
+   * commonly treat as suspect. If a batch starts coming back full of BLOCKED
+   * rows, pointing this at a residential proxy is the fix, and it is the whole
+   * fix — nothing else in the scraper changes.
+   */
+  proxy?: {
+    /** e.g. `http://proxy.example.com:8000` or `socks5://…`. */
+    server: string;
+    username?: string;
+    password?: string;
+  };
 
   /**
    * Pause between products, in ms. Zero (the default) preserves the old
@@ -229,12 +253,19 @@ export interface ResolvedOptions
   extends Required<
     Omit<
       ScraperOptions,
-      'storageStatePath' | 'screenshotOnFailureDir' | 'userAgent' | 'signal' | 'onStep' | 'shouldStop'
+      | 'storageStatePath'
+      | 'screenshotOnFailureDir'
+      | 'userAgent'
+      | 'proxy'
+      | 'signal'
+      | 'onStep'
+      | 'shouldStop'
     >
   > {
   storageStatePath?: string;
   screenshotOnFailureDir?: string;
   userAgent?: string;
+  proxy?: ScraperOptions['proxy'];
   signal?: AbortSignal;
   onStep?: StepReporter;
   shouldStop?: () => boolean;

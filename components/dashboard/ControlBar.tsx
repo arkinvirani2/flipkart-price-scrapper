@@ -11,19 +11,27 @@ interface Props {
   jobId: string;
   state: JobState;
   stats: JobStats;
-  /** Another batch holds the runner, so this one cannot start. */
+  /** Another batch holds the scraper, so this one cannot start. */
   blockedBy?: string | null;
   onError?: (message: string) => void;
+  /**
+   * What actually happened, in words. These actions are requests now — the
+   * scraper is on another machine — and the gap between asking and it being
+   * true is a real thing the user should be told about rather than left to
+   * infer from a button that did nothing visible.
+   */
+  onNotice?: (message: string) => void;
 }
 
-export function ControlBar({ jobId, state, stats, blockedBy, onError }: Props) {
+export function ControlBar({ jobId, state, stats, blockedBy, onError, onNotice }: Props) {
   const queryClient = useQueryClient();
 
   const control = useMutation({
     mutationFn: (action: 'start' | 'resume' | 'pause' | 'stop') => api.control(jobId, action),
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['job', jobId] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      if (result.note) onNotice?.(result.note);
     },
     onError: (error) => onError?.((error as Error).message),
   });
@@ -39,7 +47,7 @@ export function ControlBar({ jobId, state, stats, blockedBy, onError }: Props) {
 
   const startDisabled = busy || !resumable || nothingLeft || Boolean(blockedBy);
   const startReason = blockedBy
-    ? `Another batch is running. Only one runs at a time.`
+    ? 'Another batch is running. Only one runs at a time.'
     : nothingLeft
       ? 'Every product in this batch has a result.'
       : null;
@@ -79,7 +87,10 @@ export function ControlBar({ jobId, state, stats, blockedBy, onError }: Props) {
             </Button>
           </span>
         </TooltipTrigger>
-        <TooltipContent>Finishes the current product and saves it, then stops.</TooltipContent>
+        <TooltipContent>
+          Asks the worker to stop taking new products. It finishes the ones already in flight and
+          saves them, so nothing nearly-done is thrown away — usually within a minute.
+        </TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -97,13 +108,20 @@ export function ControlBar({ jobId, state, stats, blockedBy, onError }: Props) {
           </span>
         </TooltipTrigger>
         <TooltipContent>
-          Stops immediately. The in-flight product stays pending and is scraped again on resume.
+          Asks the worker to close its browser contexts. It notices within a few seconds; a page
+          already waiting on Flipkart takes a moment longer to let go. Products in flight stay
+          pending and are scraped again on resume.
         </TooltipContent>
       </Tooltip>
 
+      {state === 'queued' && (
+        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="size-3 animate-spin" /> waiting for a runner…
+        </span>
+      )}
       {state === 'pausing' && (
         <span className="flex items-center gap-1.5 text-xs text-status-paused">
-          <Loader2 className="size-3 animate-spin" /> finishing the current product…
+          <Loader2 className="size-3 animate-spin" /> finishing the products in flight…
         </span>
       )}
       {state === 'stopping' && (

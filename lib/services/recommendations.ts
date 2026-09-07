@@ -1,20 +1,24 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { buildRecommendation, type Recommendation } from '@/lib/recommendation';
-import { getJob, updateManifest } from '@/lib/store/jobStore';
-import { jobPaths } from '@/lib/store/paths';
+/**
+ * Pricing recommendations.
+ *
+ * These used to be a versioned JSON file per batch, and the version existed
+ * because the file had to be discarded whenever the maths behind it changed —
+ * a stale file would have shown a number the current code would never produce.
+ *
+ * They are rows now, so there is nothing to version: the shape is the table's,
+ * and a schema change is a migration. What survives from the old design is the
+ * rule that matters — a batch's recommendations are written once, when the run
+ * ends, and viewing an old batch reads them back rather than re-deciding
+ * anything. History must not move under the user.
+ */
 
-// 4: diffAmount flipped to the settlement direction (mainPrice − sellerPrice),
-// plus the Threshold Missing / Need Review statuses and their reason. Bumping
-// this discards recommendation files written by the old, wrongly-signed maths.
-// 5: finalBankSettlement added, so files written before the field existed are
-// discarded rather than loaded back without it.
-// 6: index and sku added. Files written before these existed would render an
-// empty Index column and give React a duplicate-free but meaningless key, so
-// they are discarded and regenerated from the rows rather than loaded back.
-export const RECOMMENDATION_SCHEMA = 6;
+import { buildRecommendation, type Recommendation } from '@/lib/recommendation';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import { getAllRows, getJob, updateManifest } from '@/lib/store/jobStore';
+import { recommendationToColumns, toRecommendation } from '@/lib/store/mappers';
+import type { RecommendationDb } from '@/lib/supabase/types';
 
 export interface RecommendationFile {
-  schema: number;
   jobId: string;
   jobName: string;
   accountName: string;
@@ -23,37 +27,92 @@ export interface RecommendationFile {
   recommendations: Recommendation[];
 }
 
-export function generateRecommendations(jobId: string): RecommendationFile | null {
-  const record = getJob(jobId);
-  if (!record) return null;
+const PAGE_SIZE = 1_000;
 
-  const recommendations = record.rows.map(buildRecommendation);
+/** Rebuild from the batch's rows and replace whatever was stored. */
+export async function generateRecommendations(jobId: string): Promise<RecommendationFile | null> {
+  const manifest = await getJob(jobId);
+  if (!manifest) return null;
+
+  const rows = await getAllRows(jobId);
+  const recommendations = rows.map(buildRecommendation);
   const generatedAt = new Date().toISOString();
-  const file: RecommendationFile = {
-    schema: RECOMMENDATION_SCHEMA,
+  const summary = `${recommendations.length} FSNs`;
+
+  const db = supabaseAdmin();
+
+  // Delete-then-insert rather than upsert: a requeued row that has not been
+  // re-scraped yet must lose its old recommendation, not keep it.
+  const { error: clearError } = await db.from('recommendations').delete().eq('job_id', jobId);
+  if (clearError) throw new Error(`Could not clear old recommendations: ${clearError.message}`);
+
+  for (let start = 0; start < recommendations.length; start += PAGE_SIZE) {
+    const chunk = recommendations
+      .slice(start, start + PAGE_SIZE)
+      .map((item) => recommendationToColumns(jobId, item));
+
+    const { error } = await db.from('recommendations').insert(chunk);
+    if (error) throw new Error(`Could not save recommendations: ${error.message}`);
+  }
+
+  await updateManifest(jobId, {
+    recommendationSummary: summary,
+    recommendationsGeneratedAt: generatedAt,
+  });
+
+  return {
     jobId,
-    jobName: record.manifest.name,
-    accountName: record.manifest.accountName ?? '',
+    jobName: manifest.name,
+    accountName: manifest.accountName ?? '',
     generatedAt,
-    summary: `${recommendations.length} FSNs`,
+    summary,
     recommendations,
   };
-  writeFileSync(jobPaths.recommendations(jobId), JSON.stringify(file, null, 2), 'utf8');
-  updateManifest(jobId, { recommendationSummary: file.summary, recommendationsGeneratedAt: generatedAt });
-  return file;
 }
 
-export function loadRecommendations(jobId: string): RecommendationFile | null {
-  const path = jobPaths.recommendations(jobId);
-  if (!existsSync(path)) return null;
-  try {
-    const file = JSON.parse(readFileSync(path, 'utf8')) as RecommendationFile;
-    return file.schema === RECOMMENDATION_SCHEMA ? file : null;
-  } catch {
-    return null;
+/** Read back what was stored, or null when the batch has none yet. */
+export async function loadRecommendations(jobId: string): Promise<RecommendationFile | null> {
+  const manifest = await getJob(jobId);
+  if (!manifest) return null;
+
+  const db = supabaseAdmin();
+  const recommendations: Recommendation[] = [];
+
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await db
+      .from('recommendations')
+      .select('*')
+      .eq('job_id', jobId)
+      .order('idx', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) throw new Error(`Could not read recommendations: ${error.message}`);
+
+    const batch = (data ?? []) as RecommendationDb[];
+    for (const row of batch) recommendations.push(toRecommendation(jobId, row));
+    if (batch.length < PAGE_SIZE) break;
   }
+
+  if (recommendations.length === 0) return null;
+
+  return {
+    jobId,
+    jobName: manifest.name,
+    accountName: manifest.accountName ?? '',
+    generatedAt: manifest.recommendationsGeneratedAt ?? new Date().toISOString(),
+    summary: manifest.recommendationSummary ?? `${recommendations.length} FSNs`,
+    recommendations,
+  };
 }
 
-export function ensureRecommendations(jobId: string): RecommendationFile | null {
-  return loadRecommendations(jobId) ?? generateRecommendations(jobId);
+/**
+ * Read them, generating them first if the batch has none.
+ *
+ * The worker generates these when a run ends, so this only fires for a batch
+ * whose run was interrupted before that point, or one whose rows were requeued
+ * and re-scraped since. Both are a genuine "these do not exist yet", which is
+ * why a GET is allowed to write here.
+ */
+export async function ensureRecommendations(jobId: string): Promise<RecommendationFile | null> {
+  return (await loadRecommendations(jobId)) ?? (await generateRecommendations(jobId));
 }

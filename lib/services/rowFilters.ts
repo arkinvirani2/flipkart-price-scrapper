@@ -5,9 +5,16 @@
  * the rows API, the failed-products page, and the export endpoint. An export
  * that silently ignored the filters the user could see on screen would be a
  * lie, so they all run this.
+ *
+ * The predicate used to be a JS `.filter()` over every row of the batch, which
+ * meant the whole journal was materialised to answer any question about it.
+ * It is now applied to the `job_rows_v` query instead, so Postgres does the
+ * work and only the page the user is looking at crosses the wire. The rules
+ * themselves are unchanged — including the two odd ones documented below,
+ * which are preserved deliberately rather than tidied.
  */
 
-import type { JobRow, RowStatus, ScrapeStatus } from '@/types/dashboard';
+import type { RowStatus, ScrapeStatus } from '@/types/dashboard';
 
 export interface RowFilters {
   /** Matched against sku, fsn, seller, url, status and failure message. */
@@ -58,63 +65,95 @@ export function parseRowFilters(params: URLSearchParams): RowFilters {
   };
 }
 
-export function filterRows(rows: JobRow[], filters: RowFilters): JobRow[] {
-  const search = filters.search?.toLowerCase();
-  const from = filters.from ? Date.parse(filters.from) : undefined;
-  // `to` is a date the user picked, so it should include that whole day rather
-  // than cutting off at midnight.
-  const to = filters.to ? Date.parse(filters.to) + (filters.to.length <= 10 ? 86_399_999 : 0) : undefined;
-
-  return rows.filter((row) => {
-    if (filters.status?.length && !filters.status.includes(row.status)) return false;
-
-    if (filters.failureReason?.length) {
-      const reason = row.result?.status;
-      if (!reason || !filters.failureReason.includes(reason)) return false;
-    }
-
-    if (!contains(row.sku, filters.sku)) return false;
-    if (!contains(row.fsn, filters.fsn)) return false;
-    if (!contains(row.targetSeller, filters.seller)) return false;
-    if (!contains(row.productUrl, filters.productUrl)) return false;
-
-    if (from !== undefined || to !== undefined) {
-      const finished = row.finishedAt ? Date.parse(row.finishedAt) : undefined;
-      if (finished === undefined || Number.isNaN(finished)) return false;
-      if (from !== undefined && finished < from) return false;
-      if (to !== undefined && finished > to) return false;
-    }
-
-    if (filters.minDurationMs !== undefined && (row.durationMs ?? -1) < filters.minDurationMs) return false;
-    if (filters.maxDurationMs !== undefined && (row.durationMs ?? Number.MAX_SAFE_INTEGER) > filters.maxDurationMs) {
-      return false;
-    }
-
-    if (filters.priceMismatchOnly && !row.result?.isPriceDifferent) return false;
-
-    if (search) {
-      const haystack = [
-        row.sku,
-        row.fsn,
-        row.targetSeller,
-        row.productUrl,
-        row.status,
-        row.result?.status,
-        row.result?.sellerName,
-        row.message,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-
-      if (!haystack.includes(search)) return false;
-    }
-
-    return true;
-  });
+/** Rebuild the query string these filters came from, for export links. */
+export function rowFiltersToParams(filters: RowFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.search) params.set('search', filters.search);
+  if (filters.status?.length) params.set('status', filters.status.join(','));
+  if (filters.failureReason?.length) params.set('reason', filters.failureReason.join(','));
+  if (filters.sku) params.set('sku', filters.sku);
+  if (filters.fsn) params.set('fsn', filters.fsn);
+  if (filters.seller) params.set('seller', filters.seller);
+  if (filters.productUrl) params.set('url', filters.productUrl);
+  if (filters.from) params.set('from', filters.from);
+  if (filters.to) params.set('to', filters.to);
+  if (filters.minDurationMs !== undefined) params.set('minDuration', String(filters.minDurationMs));
+  if (filters.maxDurationMs !== undefined) params.set('maxDuration', String(filters.maxDurationMs));
+  if (filters.priceMismatchOnly) params.set('mismatch', 'true');
+  return params;
 }
 
-function contains(value: string | undefined, needle: string | undefined): boolean {
-  if (!needle) return true;
-  return (value ?? '').toLowerCase().includes(needle.toLowerCase());
+/**
+ * The subset of the PostgREST builder this module touches.
+ *
+ * Structural rather than an import of PostgrestFilterBuilder: those generics
+ * change shape between supabase-js minors, and all we need is that each method
+ * returns the same builder back.
+ */
+export interface FilterableQuery<Q> {
+  eq(column: string, value: unknown): Q;
+  in(column: string, values: readonly unknown[]): Q;
+  gte(column: string, value: unknown): Q;
+  lte(column: string, value: unknown): Q;
+  ilike(column: string, pattern: string): Q;
+  not(column: string, operator: string, value: unknown): Q;
+}
+
+/** `%` and `_` are LIKE wildcards; a SKU containing one must not become a pattern. */
+function likeContains(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+/**
+ * Apply the filters to a job_rows_v query.
+ *
+ * Two behaviours carried over verbatim from the array version, because the
+ * filter bar was built against them:
+ *
+ * - A date range excludes rows that never finished. `from`/`to` are read off
+ *   the completion timestamp, and a pending row has none, so it cannot be in
+ *   any range. A bare `YYYY-MM-DD` in `to` means end of that day, not midnight.
+ * - A duration bound also excludes rows with no duration. The old code
+ *   substituted -1 for a missing duration when testing the lower bound and
+ *   MAX_SAFE_INTEGER when testing the upper one, so a null failed both. (In
+ *   principle a negative lower bound would have kept them; the filter bar only
+ *   ever sends values >= 0, so that branch was unreachable.)
+ */
+export function applyRowFilters<Q extends FilterableQuery<Q>>(query: Q, filters: RowFilters): Q {
+  let q = query;
+
+  if (filters.status?.length) q = q.in('status', filters.status);
+  // A null result_status never matches an IN list, so this drops pending rows
+  // on its own — exactly as the array version did by testing `row.result`.
+  if (filters.failureReason?.length) q = q.in('result_status', filters.failureReason);
+
+  if (filters.sku) q = q.ilike('sku', likeContains(filters.sku));
+  if (filters.fsn) q = q.ilike('fsn', likeContains(filters.fsn));
+  if (filters.seller) q = q.ilike('target_seller', likeContains(filters.seller));
+  if (filters.productUrl) q = q.ilike('product_url', likeContains(filters.productUrl));
+
+  if (filters.from || filters.to) {
+    q = q.not('finished_at', 'is', null);
+    if (filters.from) q = q.gte('finished_at', filters.from);
+    if (filters.to) {
+      const to = filters.to.length <= 10 ? `${filters.to}T23:59:59.999Z` : filters.to;
+      q = q.lte('finished_at', to);
+    }
+  }
+
+  if (filters.minDurationMs !== undefined) {
+    q = q.not('duration_ms', 'is', null).gte('duration_ms', filters.minDurationMs);
+  }
+  if (filters.maxDurationMs !== undefined) {
+    q = q.not('duration_ms', 'is', null).lte('duration_ms', filters.maxDurationMs);
+  }
+
+  if (filters.priceMismatchOnly) q = q.eq('is_price_different', true);
+
+  // One ILIKE over the view's generated search_text, which concatenates exactly
+  // the eight fields the old haystack joined. Backed by a trigram GIN index on
+  // each underlying table.
+  if (filters.search) q = q.ilike('search_text', likeContains(filters.search));
+
+  return q;
 }

@@ -1,34 +1,34 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, ExternalLink, ImageOff, RotateCcw } from 'lucide-react';
-import { useState } from 'react';
+import { CheckCircle2, ExternalLink, RotateCcw } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { api } from '@/lib/api';
 import { formatDateTime, formatDuration, shortenUrl } from '@/lib/format';
-import type { JobRow } from '@/types/dashboard';
 
 interface Props {
   jobId: string;
-  /** Retry rewrites the journal, so it is refused while the runner owns the job. */
+  /** Retry deletes results, so it is refused while a worker owns the batch. */
   canRetry: boolean;
 }
 
+/**
+ * The failures, with what was recorded about each one.
+ *
+ * There used to be a screenshot thumbnail and a lightbox here. The scraper now
+ * runs on a GitHub Actions runner whose filesystem is destroyed when the job
+ * ends, so a screenshot would have to be uploaded somewhere to survive — and
+ * that was deliberately not built. What is left is what the scraper actually
+ * knows: the status it ended on and the message explaining it, which is where
+ * the diagnosis lived anyway.
+ */
 export function FailedProducts({ jobId, canRetry }: Props) {
   const queryClient = useQueryClient();
-  const [preview, setPreview] = useState<JobRow | null>(null);
 
-  // Its own query, filtered server-side to failures — independent of whatever
+  // Its own query, filtered in SQL to failures — independent of whatever
   // filters the Queue tab happens to have set.
   const failedQuery = useQuery({
     queryKey: ['rows', jobId, 'status=failed&limit=10000'],
@@ -78,8 +78,8 @@ export function FailedProducts({ jobId, canRetry }: Props) {
         <Alert variant="warning">
           <AlertTitle>Retry is unavailable while the batch is running</AlertTitle>
           <AlertDescription>
-            Requeuing rewrites the results journal, which would race the run currently appending to
-            it. Pause or stop the batch first.
+            Requeuing deletes those rows&apos; results, and the worker decides what is still pending
+            by asking the same question. Pause or stop the batch first.
           </AlertDescription>
         </Alert>
       )}
@@ -134,27 +134,6 @@ export function FailedProducts({ jobId, canRetry }: Props) {
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
-                {row.screenshotPath ? (
-                  <button
-                    type="button"
-                    onClick={() => setPreview(row)}
-                    className="overflow-hidden rounded border transition-colors hover:border-primary"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={screenshotUrl(jobId, row.screenshotPath)}
-                      alt={`Failure screenshot for ${row.sku}`}
-                      className="h-16 w-28 object-cover"
-                      loading="lazy"
-                    />
-                  </button>
-                ) : (
-                  <div className="flex h-16 w-28 flex-col items-center justify-center gap-1 rounded border border-dashed text-[10px] text-muted-foreground">
-                    <ImageOff className="size-4" aria-hidden />
-                    no screenshot
-                  </div>
-                )}
-
                 <Button
                   variant="outline"
                   size="sm"
@@ -168,40 +147,6 @@ export function FailedProducts({ jobId, canRetry }: Props) {
           </Card>
         ))}
       </div>
-
-      <Dialog open={Boolean(preview)} onOpenChange={(open) => !open && setPreview(null)}>
-        <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>{preview?.sku}</DialogTitle>
-            <DialogDescription>{preview?.message}</DialogDescription>
-          </DialogHeader>
-          {preview?.screenshotPath && (
-            <div className="space-y-3">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={screenshotUrl(jobId, preview.screenshotPath)}
-                alt={`Failure screenshot for ${preview.sku}`}
-                className="max-h-[60vh] w-full rounded border object-contain"
-              />
-              <Button variant="outline" size="sm" asChild>
-                <a href={screenshotUrl(jobId, preview.screenshotPath)} download>
-                  Download screenshot
-                </a>
-              </Button>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
-}
-
-/**
- * The journal stores an absolute path; the route wants job id plus filename.
- * Deriving it here means a doctored journal cannot point the browser anywhere
- * outside this job's screenshot directory.
- */
-function screenshotUrl(jobId: string, storedPath: string): string {
-  const filename = storedPath.split(/[\\/]/).pop() ?? '';
-  return `/api/screenshots/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`;
 }

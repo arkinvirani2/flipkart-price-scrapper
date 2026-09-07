@@ -78,7 +78,9 @@ const COLUMNS: Column[] = [
   // Stamped when a row succeeds or fails, so this is the scrape's completion time.
   { header: 'Finished At', width: 22, value: (row) => toDate(row.finishedAt), numFmt: 'dd/mm/yyyy hh:mm:ss' },
   { header: 'Message', width: 48, value: (row) => row.message ?? null },
-  { header: 'Screenshot', width: 30, value: (row) => (row.screenshotPath ? 'yes' : null) },
+  // No Screenshot column: the worker runs on a GitHub Actions runner whose
+  // filesystem is destroyed when the job ends, so failure screenshots are no
+  // longer captured. `Message` carries what they were being consulted for.
   { header: 'Product URL', width: 60, value: (row) => row.productUrl },
   // The Seller Hub listing deep link a settlement row opens when clicked, so the
   // export lands on the same page the dashboard does. Empty without an FSN.

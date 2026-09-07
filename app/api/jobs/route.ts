@@ -1,12 +1,15 @@
 /**
  * GET  /api/jobs — every batch, newest first, with live counts.
  * POST /api/jobs — create a batch from validated rows.
+ *
+ * Both are short database calls now. The list used to call computeStats() once
+ * per batch, re-reading each journal to do it; it is one aggregate query.
  */
 
 import { NextResponse } from 'next/server';
-import { computeStats, createJob, listJobs } from '@/lib/store/jobStore';
-import { ensureRecovered } from '@/lib/services/recovery';
-import { getRunner } from '@/lib/runner/jobRunner';
+import { createJob, listJobsWithStats } from '@/lib/store/jobStore';
+import { activeJobId, reapIfDue } from '@/lib/store/lease';
+import { EMPTY_STATS } from '@/lib/store/stats';
 import { validateUpload } from '@/lib/validation/uploadSchema';
 import { DEFAULT_JOB_OPTIONS, MAX_CONCURRENCY, type JobOptions } from '@/types/dashboard';
 import type { OrdersReport } from '@/lib/demand';
@@ -15,17 +18,16 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  // Any entry point may be the first one hit after a restart, so recovery runs
-  // here rather than in a bootstrap file that a given request might not import.
-  ensureRecovered();
+  // Best-effort, rate-limited: flips batches whose worker stopped reporting to
+  // `interrupted`. Nothing depends on it running here — the worker reaps on
+  // startup — it just shortens the window in which a dead run still looks live.
+  await reapIfDue();
 
-  const jobs = listJobs().map((manifest) => ({ ...manifest, stats: computeStats(manifest.id) }));
-  return NextResponse.json({ jobs, activeJobId: getRunner().activeJobId() });
+  const [jobs, active] = await Promise.all([listJobsWithStats(), activeJobId()]);
+  return NextResponse.json({ jobs, activeJobId: active });
 }
 
 export async function POST(request: Request) {
-  ensureRecovered();
-
   let body: {
     name?: string;
     accountName?: string;
@@ -40,7 +42,7 @@ export async function POST(request: Request) {
   }
 
   // Re-validate server-side. The client already did, but the client is not the
-  // authority on what lands on disk.
+  // authority on what lands in the database.
   const report = validateUpload(JSON.stringify(body.rows ?? []));
   if (!report.ok) {
     return NextResponse.json({ error: 'Rows failed validation.', report }, { status: 400 });
@@ -51,9 +53,22 @@ export async function POST(request: Request) {
   // The account defaults to the seller name the rows already carry, so a client
   // that does not send one still lands in the right history.
   const accountName = (body.accountName ?? '').trim() || report.rows[0]?.targetSeller || '';
-  const manifest = createJob(name, report.rows, options, accountName, ordersOrNull(body.orders));
 
-  return NextResponse.json({ job: manifest, stats: computeStats(manifest.id) }, { status: 201 });
+  try {
+    const manifest = await createJob(name, report.rows, options, accountName, ordersOrNull(body.orders));
+    // A batch that has just been created has no results, so its counts are the
+    // empty set with the row total filled in — no need for a round trip to
+    // learn that nothing has happened yet.
+    return NextResponse.json(
+      { job: manifest, stats: { ...EMPTY_STATS, total: manifest.total, pending: manifest.total, queueLength: manifest.total } },
+      { status: 201 },
+    );
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Could not create the batch.' },
+      { status: 500 },
+    );
+  }
 }
 
 /**
@@ -62,9 +77,11 @@ export async function POST(request: Request) {
  *
  * `concurrency` is the one that can hurt: it is the number of browser contexts
  * the run will open at once, so an unchecked value out of a request body is a
- * way to exhaust the machine's memory. The rest are clamped in the same pass
- * because a zero timeout or a negative delay would fail deep inside the scraper
- * rather than here, where the value came from.
+ * way to exhaust the machine's memory. (The worker clamps it again against
+ * WORKER_MAX_CONCURRENCY, because a GitHub runner is smaller than the laptop
+ * this ceiling was chosen for.) The rest are clamped in the same pass because a
+ * zero timeout or a negative delay would fail deep inside the scraper rather
+ * than here, where the value came from.
  */
 function sanitizeOptions(posted: Partial<JobOptions> | undefined): JobOptions {
   const merged: JobOptions = { ...DEFAULT_JOB_OPTIONS, ...(posted ?? {}) };

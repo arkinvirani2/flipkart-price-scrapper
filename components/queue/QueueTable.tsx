@@ -1,7 +1,7 @@
 'use client';
 
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ExternalLink, ImageIcon } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 import { useRef } from 'react';
 import { RowStatusBadge } from '@/components/dashboard/StatusBadge';
 import { formatDifference, formatDuration, formatPrice, shortenUrl } from '@/lib/format';
@@ -117,7 +117,6 @@ export function QueueTable({ rows, onSelect, emptyMessage = 'No products match t
                     {row.result?.status === 'OK' ? formatDifference(computeSettlement(row).difference) : '—'}
                   </span>
                   <span className="flex items-center justify-end gap-1 text-muted-foreground">
-                    {row.screenshotPath && <ImageIcon className="size-3.5" aria-label="has screenshot" />}
                     <a
                       href={row.productUrl}
                       target="_blank"

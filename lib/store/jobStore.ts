@@ -1,27 +1,33 @@
 /**
- * Job store: NDJSON on disk, indexed in memory.
+ * Job store, backed by Postgres.
  *
- * The journal file is the record of truth — it is appended synchronously before
- * the next product starts, exactly as the CLI does it, so a crash can only lose
- * the product that was in flight. Everything the UI queries (filters, sorting,
- * search, analytics) runs against the in-memory index built from that file, so
- * a 1000-row batch is never re-parsed to answer a request.
+ * This used to be NDJSON on disk indexed in memory, which worked precisely
+ * because one process owned both the scraper and the dashboard. It no longer
+ * does: the scraper runs in GitHub Actions and the dashboard on Vercel, so the
+ * two share nothing but the database. Supabase is therefore the record of
+ * truth, and there is no cache here at all — a cached row would be a claim
+ * about a process this one cannot see.
  *
- * Deliberately not a database. A batch is a few hundred KB of rows and one
- * writer at a time; the file *is* the checkpoint, and keeping it means the CLI
- * and the dashboard can resume each other's work.
+ * Everything is async, and everything that filters, sorts, counts or paginates
+ * does so in SQL. The old module answered those questions by materialising the
+ * whole batch; a serverless function has no reason to.
+ *
+ * Writes go through the service-role client, so this module is server-only.
  */
 
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
-  appendJournal,
-  loadResumableJournal,
-  readJournal,
-  resultKey,
-  rewriteJournal,
-} from '@/scraper/journal';
+  inputToColumns,
+  manifestPatchToColumns,
+  resultToColumns,
+  toJobRow,
+  toManifest,
+  toScrapeInput,
+} from '@/lib/store/mappers';
+import { EMPTY_STATS, statsFromView } from '@/lib/store/stats';
+import { assertJobId, newJobId } from '@/lib/store/ids';
+import { applyRowFilters, type RowFilters } from '@/lib/services/rowFilters';
 import { sellerNamesMatch } from '@/scraper/parser';
-import { startingPoolWidth } from '@/scraper/utils';
 import type { OrdersReport } from '@/lib/demand';
 import type { ScrapeInput, ScrapeResult } from '@/scraper/types';
 import { DEFAULT_JOB_OPTIONS } from '@/types/dashboard';
@@ -32,170 +38,168 @@ import type {
   JobState,
   JobStats,
   JournalRow,
-  RowStatus,
+  LiveProgress,
 } from '@/types/dashboard';
-import { ensureDataDir, ensureJobDir, jobDir, jobPaths, jobsDir, newJobId } from './paths';
-
-interface JobRecord {
-  manifest: JobManifest;
-  inputs: ScrapeInput[];
-  rows: JobRow[];
-  byKey: Map<string, JobRow>;
-}
+import type {
+  JobInputDb,
+  JobRowDb,
+  JobRowViewDb,
+  JobStatsViewDb,
+  RequestedAction,
+} from '@/lib/supabase/types';
 
 /**
- * Pinned to globalThis so Next's dev-mode module reloading doesn't hand out a
- * second, empty cache while a job is mid-flight.
+ * PostgREST returns at most a page at a time, and a batch is routinely a
+ * thousand rows. Anything that genuinely needs every row (export, analytics,
+ * recommendations, the worker's pending list) pages through in these chunks.
  */
-const cache: Map<string, JobRecord> = ((globalThis as Record<string, unknown>).__jobCache as Map<
-  string,
-  JobRecord
->) ?? new Map<string, JobRecord>();
-(globalThis as Record<string, unknown>).__jobCache = cache;
+const PAGE_SIZE = 1_000;
 
 /* ------------------------------------------------------------------ create */
 
-export function createJob(
+export async function createJob(
   name: string,
   inputs: ScrapeInput[],
   options: JobOptions,
   accountName?: string,
   /** Per-FSN demand from the orders report, when one was uploaded with the batch. */
   orders?: OrdersReport | null,
-): JobManifest {
-  ensureDataDir();
+): Promise<JobManifest> {
+  const db = supabaseAdmin();
   const id = newJobId();
-  ensureJobDir(id);
-
   const createdAt = new Date().toISOString();
-  const manifest: JobManifest = {
-    id,
-    name,
-    createdAt,
-    state: 'queued',
-    total: inputs.length,
-    options,
-    // The account is the seller name every row carries, so the rows are the
-    // fallback when the caller does not name it explicitly.
-    accountName: (accountName ?? inputs[0]?.targetSeller ?? '').trim(),
-    uploadTime: createdAt,
-    ordersWindow: orders
-      ? {
-          start: orders.windowStart,
-          end: orders.windowEnd,
-          last24hStart: orders.last24hStart,
-          observedDays: orders.observedDays,
-          orderItems: orders.totalOrderItems,
-          units: orders.totalUnits,
-          fsnCount: orders.fsnCount,
-        }
-      : undefined,
+
+  const { data, error } = await db
+    .from('jobs')
+    .insert({
+      id,
+      name,
+      // The account is the seller name every row carries, so the rows are the
+      // fallback when the caller does not name it explicitly.
+      account_name: (accountName ?? inputs[0]?.targetSeller ?? '').trim(),
+      state: 'queued',
+      requested_action: 'RUN',
+      total: inputs.length,
+      options,
+      created_at: createdAt,
+      upload_time: createdAt,
+      orders_window: orders
+        ? {
+            start: orders.windowStart,
+            end: orders.windowEnd,
+            last24hStart: orders.last24hStart,
+            observedDays: orders.observedDays,
+            orderItems: orders.totalOrderItems,
+            units: orders.totalUnits,
+            fsnCount: orders.fsnCount,
+          }
+        : null,
+    })
+    .select('*')
+    .single();
+
+  if (error) throw new Error(`Could not create the batch: ${error.message}`);
+
+  // Inputs in chunks: a 1000-row spreadsheet in one INSERT is a large request
+  // body, and a partial failure mid-way is easier to reason about per chunk.
+  for (let start = 0; start < inputs.length; start += PAGE_SIZE) {
+    const chunk = inputs
+      .slice(start, start + PAGE_SIZE)
+      .map((input, offset) => inputToColumns(id, input, start + offset));
+
+    const { error: inputError } = await db.from('job_inputs').insert(chunk);
+    if (inputError) {
+      // Leaving a job row with half its inputs would show the user a batch that
+      // silently scrapes the wrong number of products. Cascade takes the rest.
+      await db.from('jobs').delete().eq('id', id);
+      throw new Error(`Could not save the uploaded rows: ${inputError.message}`);
+    }
+  }
+
+  return toManifest(data as JobRowDb);
+}
+
+/* ---------------------------------------------------------------- reading */
+
+/**
+ * The batch manifest, or null when there is no such batch.
+ *
+ * The filesystem version returned a record carrying the manifest, the inputs
+ * and every row joined together, because it had just read all of that off disk
+ * anyway. Here those are three different queries with three different costs, so
+ * callers ask for what they need: `getRows`, `getAllRows`, `pendingInputs`.
+ */
+export async function getJob(jobId: string): Promise<JobManifest | null> {
+  if (!isValidId(jobId)) return null;
+
+  const { data, error } = await supabaseAdmin().from('jobs').select('*').eq('id', jobId).maybeSingle();
+  if (error || !data) return null;
+
+  return toManifest(data as JobRowDb);
+}
+
+/** The raw job row, including the control and lease columns the manifest hides. */
+export async function getJobRow(jobId: string): Promise<JobRowDb | null> {
+  if (!isValidId(jobId)) return null;
+
+  const { data, error } = await supabaseAdmin().from('jobs').select('*').eq('id', jobId).maybeSingle();
+  if (error || !data) return null;
+
+  return data as JobRowDb;
+}
+
+export async function listJobs(): Promise<JobManifest[]> {
+  const { data, error } = await supabaseAdmin()
+    .from('jobs')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error || !data) return [];
+  return (data as JobRowDb[]).map(toManifest);
+}
+
+/**
+ * Every batch with its counts, in one round trip plus one.
+ *
+ * The old dashboard list called computeStats() once per job, and each of those
+ * calls re-read that job's whole journal — an N+1 that grew with both the
+ * number of batches and their size. job_stats_v aggregates all of them at once.
+ */
+export async function listJobsWithStats(): Promise<(JobManifest & { stats: JobStats })[]> {
+  const db = supabaseAdmin();
+
+  const [jobsResult, statsResult] = await Promise.all([
+    db.from('jobs').select('*').order('created_at', { ascending: false }),
+    db.from('job_stats_v').select('*'),
+  ]);
+
+  if (jobsResult.error || !jobsResult.data) return [];
+
+  const statsById = new Map<string, JobStatsViewDb>(
+    ((statsResult.data ?? []) as JobStatsViewDb[]).map((row) => [row.job_id, row]),
+  );
+
+  return (jobsResult.data as JobRowDb[]).map((row) => {
+    const manifest = toManifest(row);
+    return { ...manifest, stats: statsFromView(statsById.get(row.id), manifest.options) };
+  });
+}
+
+export async function computeStats(jobId: string): Promise<JobStats> {
+  if (!isValidId(jobId)) return EMPTY_STATS;
+
+  const db = supabaseAdmin();
+  const [statsResult, jobResult] = await Promise.all([
+    db.from('job_stats_v').select('*').eq('job_id', jobId).maybeSingle(),
+    db.from('jobs').select('options').eq('id', jobId).maybeSingle(),
+  ]);
+
+  const options = {
+    ...DEFAULT_JOB_OPTIONS,
+    ...((jobResult.data?.options as JobOptions | undefined) ?? {}),
   };
 
-  writeFileSync(jobPaths.inputs(id), JSON.stringify(inputs, null, 2), 'utf8');
-  if (orders) writeFileSync(jobPaths.orders(id), JSON.stringify(orders), 'utf8');
-  writeManifest(manifest);
-  // Create the journal up front so an interrupted job always has a file to read.
-  if (!existsSync(jobPaths.journal(id))) writeFileSync(jobPaths.journal(id), '', 'utf8');
-
-  cache.set(id, buildRecord(manifest, inputs, []));
-  return manifest;
-}
-
-/* -------------------------------------------------------------- hydration */
-
-function writeManifest(manifest: JobManifest): void {
-  writeFileSync(jobPaths.manifest(manifest.id), JSON.stringify(manifest, null, 2), 'utf8');
-}
-
-/** Build the queue rows by joining inputs against whatever the journal holds. */
-function buildRecord(manifest: JobManifest, inputs: ScrapeInput[], journal: JournalRow[]): JobRecord {
-  const done = new Map<string, JournalRow>();
-  for (const row of journal) done.set(resultKey(row), row);
-
-  const rows: JobRow[] = inputs.map((input, index) => {
-    const key = resultKey(input);
-    const result = done.get(key);
-
-    return {
-      index,
-      key,
-      sku: input.sku,
-      fsn: input.fsn,
-      targetSeller: input.targetSeller,
-      productUrl: input.productUrl,
-      status: statusForResult(result),
-      result,
-      durationMs: result?.durationMs,
-      attempts: result?.attempts,
-      message: result?.message,
-      screenshotPath: result?.screenshotPath,
-      finishedAt: result?.finishedAt,
-      currentBankSettlement: input.currentBankSettlement,
-      bankSettlementThreshold: input.bankSettlementThreshold,
-      benchmarkPrice: input.benchmarkPrice,
-      stockCount: input.stockCount,
-      listingPrice: input.listingPrice,
-      lowestListingFile: input.lowestListingFile,
-    };
-  });
-
-  const byKey = new Map(rows.map((row) => [row.key, row]));
-  return { manifest, inputs, rows, byKey };
-}
-
-function statusForResult(result: ScrapeResult | undefined): RowStatus {
-  if (!result) return 'pending';
-  return result.status === 'OK' ? 'success' : 'failed';
-}
-
-/** Load a job from disk, or return the cached index. */
-export function getJob(jobId: string): JobRecord | null {
-  const cached = cache.get(jobId);
-  if (cached) return cached;
-
-  const manifestPath = jobPaths.manifest(jobId);
-  if (!existsSync(manifestPath)) return null;
-
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as JobManifest;
-    const inputs = JSON.parse(readFileSync(jobPaths.inputs(jobId), 'utf8')) as ScrapeInput[];
-
-    // Jobs created before accounts existed have neither field. Backfilling in
-    // memory keeps them visible in the account-wise views without rewriting
-    // files the user never asked us to touch.
-    if (!manifest.accountName) manifest.accountName = inputs[0]?.targetSeller ?? '';
-    if (!manifest.uploadTime) manifest.uploadTime = manifest.createdAt;
-    // Likewise for options added after a job was created — `concurrency` and
-    // `blockResources`, in particular. The scraper already falls back to its own
-    // defaults for an absent key, so without this the runner would quietly use
-    // three workers while `computeStats` quoted a one-worker ETA.
-    manifest.options = { ...DEFAULT_JOB_OPTIONS, ...manifest.options };
-    // readJournal, not the resume filter: the UI should show BLOCKED rows as the
-    // failures they were. Blocked rows are only dropped when a run actually starts.
-    const journal = readJournal(jobPaths.journal(jobId)) as JournalRow[];
-
-    const record = buildRecord(manifest, inputs, journal);
-    cache.set(jobId, record);
-    return record;
-  } catch {
-    return null;
-  }
-}
-
-export function listJobs(): JobManifest[] {
-  ensureDataDir();
-  let entries: string[];
-  try {
-    entries = readdirSync(jobsDir());
-  } catch {
-    return [];
-  }
-
-  return entries
-    .map((id) => getJob(id)?.manifest)
-    .filter((manifest): manifest is JobManifest => Boolean(manifest))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return statsFromView(statsResult.data as JobStatsViewDb | null, options);
 }
 
 /**
@@ -217,18 +221,26 @@ export interface AccountSummary {
 /**
  * The accounts that have uploads, newest first.
  *
- * Derived from the job folders rather than kept in a separate registry — one
- * fewer file to keep in step, and deleting the last batch for an account
- * removes the account with it.
+ * Still derived from the batches rather than kept in a separate registry — one
+ * fewer thing to keep in step, and deleting the last batch for an account
+ * removes the account with it. The grouping stays in JS because it uses the
+ * scraper's fuzzy name matcher, not string equality.
  */
-export function listAccounts(): AccountSummary[] {
+export async function listAccounts(): Promise<AccountSummary[]> {
+  const { data, error } = await supabaseAdmin()
+    .from('jobs')
+    .select('account_name, upload_time, created_at')
+    .order('created_at', { ascending: false });
+
+  if (error || !data) return [];
+
   const accounts: AccountSummary[] = [];
 
-  for (const manifest of listJobs()) {
-    const name = manifest.accountName?.trim();
+  for (const row of data as { account_name: string; upload_time: string | null; created_at: string }[]) {
+    const name = row.account_name?.trim();
     if (!name) continue;
 
-    const uploadedAt = manifest.uploadTime ?? manifest.createdAt;
+    const uploadedAt = new Date(row.upload_time ?? row.created_at).toISOString();
     const existing = accounts.find((account) => sameAccount(account.name, name));
 
     if (existing) {
@@ -243,224 +255,300 @@ export function listAccounts(): AccountSummary[] {
   return accounts.sort((a, b) => b.lastUploadAt.localeCompare(a.lastUploadAt));
 }
 
-export function deleteJob(jobId: string): boolean {
-  const dir = jobDir(jobId);
-  if (!existsSync(dir)) return false;
-  rmSync(dir, { recursive: true, force: true });
-  cache.delete(jobId);
-  return true;
-}
-
 /* --------------------------------------------------------------- mutation */
 
-/** Patch the manifest on disk and in the index. The one place job.json is edited. */
-export function updateManifest(jobId: string, patch: Partial<JobManifest>): JobManifest | null {
-  const record = getJob(jobId);
-  if (!record) return null;
+export async function deleteJob(jobId: string): Promise<boolean> {
+  if (!isValidId(jobId)) return false;
 
-  record.manifest = { ...record.manifest, ...patch };
-  writeManifest(record.manifest);
-  return record.manifest;
+  // Inputs, results and recommendations go with it: every child table declares
+  // `on delete cascade`. fsn_intelligence deliberately does not.
+  const { data, error } = await supabaseAdmin().from('jobs').delete().eq('id', jobId).select('id');
+  if (error) throw new Error(`Could not delete the batch: ${error.message}`);
+
+  return (data?.length ?? 0) > 0;
 }
 
-export function setJobState(jobId: string, state: JobState, extra: Partial<JobManifest> = {}): JobManifest | null {
+/** Patch the batch row. The one place the manifest columns are edited. */
+export async function updateManifest(
+  jobId: string,
+  patch: Partial<JobManifest>,
+): Promise<JobManifest | null> {
+  if (!isValidId(jobId)) return null;
+
+  const columns = manifestPatchToColumns(patch);
+  if (Object.keys(columns).length === 0) return getJob(jobId);
+
+  const { data, error } = await supabaseAdmin()
+    .from('jobs')
+    .update(columns)
+    .eq('id', jobId)
+    .select('*')
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return toManifest(data as JobRowDb);
+}
+
+export async function setJobState(
+  jobId: string,
+  state: JobState,
+  extra: Partial<JobManifest> = {},
+): Promise<JobManifest | null> {
   return updateManifest(jobId, { ...extra, state });
 }
 
-export function updateJobOptions(jobId: string, options: JobOptions): JobManifest | null {
-  return setJobState(jobId, getJob(jobId)?.manifest.state ?? 'queued', { options });
+/**
+ * Record what the user last asked for.
+ *
+ * Separate from `state` on purpose: the worker is in another process on another
+ * machine, so a Pause is a request that becomes true when the worker next looks,
+ * not an instruction that takes effect on return. The dashboard shows the
+ * transient `pausing` / `stopping` states for exactly that gap.
+ */
+export async function setRequestedAction(
+  jobId: string,
+  action: RequestedAction,
+  extra: Partial<JobManifest> = {},
+): Promise<JobManifest | null> {
+  if (!isValidId(jobId)) return null;
+
+  const { data, error } = await supabaseAdmin()
+    .from('jobs')
+    .update({ ...manifestPatchToColumns(extra), requested_action: action })
+    .eq('id', jobId)
+    .select('*')
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return toManifest(data as JobRowDb);
 }
 
 /**
- * Persist one finished product, then update the index.
+ * Persist one finished product.
  *
- * Journal first, always: if the process dies between the two, the row is still
- * on disk and the next hydration picks it up. The reverse order would report
- * progress the disk cannot back up.
+ * `idx` is the row's position in the upload, which is what the database keys
+ * on. The old store matched on a NUL-joined `sku + productUrl` string because
+ * a journal line carried no position; a database row does, so the join is now
+ * an integer and cannot collide.
+ *
+ * Upsert rather than insert: a worker that is re-run after an interrupted
+ * batch may legitimately re-report a product whose write landed but whose
+ * acknowledgement did not.
  */
-export function recordResult(jobId: string, result: ScrapeResult): JobRow | null {
-  const record = getJob(jobId);
-  if (!record) return null;
-
+export async function recordResult(jobId: string, idx: number, result: ScrapeResult): Promise<JournalRow> {
   const stamped: JournalRow = { ...result, finishedAt: new Date().toISOString() };
-  appendJournal(jobPaths.journal(jobId), stamped);
 
-  const row = record.byKey.get(resultKey(stamped));
-  if (!row) return null;
+  const { error } = await supabaseAdmin()
+    .from('job_results')
+    .upsert(resultToColumns(jobId, idx, stamped), { onConflict: 'job_id,idx' });
 
-  row.status = statusForResult(stamped);
-  row.result = stamped;
-  row.durationMs = stamped.durationMs;
-  row.attempts = stamped.attempts;
-  row.message = stamped.message;
-  row.screenshotPath = stamped.screenshotPath;
-  row.finishedAt = stamped.finishedAt;
-  return row;
+  if (error) throw new Error(`Could not save the result for row ${idx}: ${error.message}`);
+  return stamped;
 }
 
-/** Transient status for the row currently being worked, or reset on pause/stop. */
-export function setRowStatus(jobId: string, index: number, status: RowStatus): JobRow | null {
-  const row = getJob(jobId)?.rows[index];
-  if (!row) return null;
-  row.status = status;
-  return row;
-}
-
-/** Clear any lingering `running` marker — used when a run ends for any reason. */
-export function clearTransientRowStatuses(jobId: string): void {
-  const record = getJob(jobId);
-  if (!record) return;
-  for (const row of record.rows) {
-    if (row.status === 'running' || row.status === 'paused') {
-      row.status = row.result ? statusForResult(row.result) : 'pending';
-    }
-  }
+/** Overwrite the live progress snapshot the dashboard renders from. */
+export async function setProgress(jobId: string, progress: LiveProgress[]): Promise<void> {
+  await supabaseAdmin().from('jobs').update({ progress }).eq('id', jobId);
 }
 
 /* ----------------------------------------------------------------- queries */
 
-export function getRows(jobId: string): JobRow[] {
-  return getJob(jobId)?.rows ?? [];
+export interface RowPage {
+  rows: JobRow[];
+  /** Every row in the batch, before filtering. */
+  total: number;
+  /** Rows the filters matched, before paging. */
+  matched: number;
+  offset: number;
+  limit: number;
 }
 
 /**
- * The orders report this batch was uploaded with, or null when it had none.
+ * A page of the queue, filtered and counted in SQL.
  *
- * Read from disk on demand rather than cached with the row index: it is only
- * touched when recommendations are generated, and a stale copy of it would
- * silently re-date "the last 24 hours".
+ * Ordered by `idx`, which is upload order — the same order the array version
+ * returned, and the order the queue table and the exports assume.
  */
-export function getOrdersReport(jobId: string): OrdersReport | null {
-  const path = jobPaths.orders(jobId);
-  if (!existsSync(path)) return null;
+export async function getRows(
+  jobId: string,
+  filters: RowFilters = {},
+  page: { offset?: number; limit?: number } = {},
+): Promise<RowPage> {
+  const offset = Math.max(0, page.offset ?? 0);
+  const limit = Math.min(5_000, Math.max(1, page.limit ?? 500));
 
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as OrdersReport;
-  } catch {
-    // A torn file must read as "no orders report", never as "no orders" — the
-    // difference is a price cut on an FSN nobody measured.
-    return null;
+  if (!isValidId(jobId)) return { rows: [], total: 0, matched: 0, offset, limit };
+
+  const db = supabaseAdmin();
+
+  const totalPromise = db
+    .from('job_inputs')
+    .select('idx', { count: 'exact', head: true })
+    .eq('job_id', jobId);
+
+  const filtered = applyRowFilters(
+    db.from('job_rows_v').select('*', { count: 'exact' }).eq('job_id', jobId),
+    filters,
+  )
+    .order('idx', { ascending: true })
+    .range(offset, offset + limit - 1);
+
+  const [totalResult, pageResult] = await Promise.all([totalPromise, filtered]);
+
+  if (pageResult.error) {
+    throw new Error(`Could not read the queue: ${pageResult.error.message}`);
   }
+
+  return {
+    rows: ((pageResult.data ?? []) as JobRowViewDb[]).map(toJobRow),
+    total: totalResult.count ?? 0,
+    matched: pageResult.count ?? 0,
+    offset,
+    limit,
+  };
+}
+
+/**
+ * Every matching row, paged through.
+ *
+ * For the callers that genuinely need the whole set — export, analytics'
+ * fallback, recommendation generation. Kept explicit so it is obvious at the
+ * call site that this one is not bounded by a page.
+ */
+export async function getAllRows(jobId: string, filters: RowFilters = {}): Promise<JobRow[]> {
+  if (!isValidId(jobId)) return [];
+
+  const db = supabaseAdmin();
+  const rows: JobRow[] = [];
+
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const query = applyRowFilters(db.from('job_rows_v').select('*').eq('job_id', jobId), filters)
+      .order('idx', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    const { data, error } = await query;
+    if (error) throw new Error(`Could not read the queue: ${error.message}`);
+
+    const batch = (data ?? []) as JobRowViewDb[];
+    rows.push(...batch.map(toJobRow));
+    if (batch.length < PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
+/**
+ * How many products still need scraping.
+ *
+ * A `head: true` count, so asking "is there anything left to do?" before
+ * starting a run costs one number rather than the whole pending list.
+ */
+export async function countPending(jobId: string): Promise<number> {
+  if (!isValidId(jobId)) return 0;
+
+  const { count, error } = await supabaseAdmin()
+    .from('job_rows_v')
+    .select('idx', { count: 'exact', head: true })
+    .eq('job_id', jobId)
+    .eq('status', 'pending');
+
+  if (error) throw new Error(`Could not count pending products: ${error.message}`);
+  return count ?? 0;
+}
+
+export interface PendingInput {
+  /** Position in the upload. The key every write goes back under. */
+  idx: number;
+  input: ScrapeInput;
 }
 
 /**
  * Inputs still needing a scrape, in queue order.
  *
- * This is the resume rule, and it is the scraper's own: a row is done when the
- * journal holds a result under its `resultKey`. Completed products are never
- * re-scraped.
+ * The resume rule, unchanged in substance: a row is done when a result exists
+ * for it, and a finished product is never re-scraped. What changed is that the
+ * question is now a LEFT JOIN instead of a Map built from a journal file.
  */
-export function pendingInputs(jobId: string): ScrapeInput[] {
-  const record = getJob(jobId);
-  if (!record) return [];
-  return record.rows.filter((row) => !row.result).map((row) => record.inputs[row.index]);
+export async function pendingInputs(jobId: string): Promise<PendingInput[]> {
+  if (!isValidId(jobId)) return [];
+
+  const db = supabaseAdmin();
+  const pending: PendingInput[] = [];
+
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await db
+      .from('job_rows_v')
+      .select(
+        'job_id, idx, sku, fsn, target_seller, product_url, current_bank_settlement, ' +
+          'bank_settlement_threshold, benchmark_price, stock_count, listing_price, lowest_listing_file',
+      )
+      .eq('job_id', jobId)
+      .eq('status', 'pending')
+      .order('idx', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) throw new Error(`Could not read the pending queue: ${error.message}`);
+
+    const batch = (data ?? []) as unknown as JobInputDb[];
+    for (const row of batch) pending.push({ idx: row.idx, input: toScrapeInput(row) });
+    if (batch.length < PAGE_SIZE) break;
+  }
+
+  return pending;
 }
 
 /**
- * Drop BLOCKED rows so a resumed run retries them, healing the journal file in
- * the same step. Mirrors what `--resume` does on the CLI, via the same helper.
+ * Drop BLOCKED results so a resumed run retries them.
+ *
+ * BLOCKED describes the bot wall, not the product, so it was never an answer.
+ * This is the same rule the CLI's `--resume` applies when it heals a journal;
+ * here it is a DELETE, and the LEFT JOIN in job_rows_v turns those rows back
+ * into pending ones on its own.
  */
-export function prepareForRun(jobId: string): number {
-  const record = getJob(jobId);
-  if (!record) return 0;
+export async function prepareForRun(jobId: string): Promise<number> {
+  if (!isValidId(jobId)) return 0;
 
-  const { done, retrying } = loadResumableJournal(jobPaths.journal(jobId));
+  const { data, error } = await supabaseAdmin()
+    .from('job_results')
+    .delete()
+    .eq('job_id', jobId)
+    .eq('status', 'BLOCKED')
+    .select('idx');
 
-  cache.set(jobId, buildRecord(record.manifest, record.inputs, done as JournalRow[]));
-  return retrying;
+  if (error) throw new Error(`Could not prepare the batch for a run: ${error.message}`);
+  return data?.length ?? 0;
 }
 
 /**
  * Send finished rows back to the queue.
  *
- * A row is "done" precisely because the journal holds a result for it, so
- * retrying means removing those lines and rewriting the file. The rewrite is
- * the same healing write the resume path uses, which is why a retry survives a
- * crash halfway through it: the file is replaced atomically enough that the
- * next hydration sees either the old set or the new one.
+ * A row is "done" precisely because a result exists for it, so retrying means
+ * deleting those results. One statement, so a crash halfway through it leaves
+ * either all of them or none — the old version rewrote a whole file to achieve
+ * roughly the same thing and admitted in its own comment that it was only
+ * "atomic enough".
  */
-export function requeueRows(jobId: string, indexes: number[]): number {
-  const record = getJob(jobId);
-  if (!record) return 0;
+export async function requeueRows(jobId: string, indexes: number[]): Promise<number> {
+  if (!isValidId(jobId) || indexes.length === 0) return 0;
 
-  const targets = new Set(indexes);
-  const dropped = new Set(
-    record.rows.filter((row) => targets.has(row.index) && row.result).map((row) => row.key),
-  );
-  if (dropped.size === 0) return 0;
+  const { data, error } = await supabaseAdmin()
+    .from('job_results')
+    .delete()
+    .eq('job_id', jobId)
+    .in('idx', indexes)
+    .select('idx');
 
-  const kept = readJournal(jobPaths.journal(jobId)).filter((row) => !dropped.has(resultKey(row)));
-  rewriteJournal(jobPaths.journal(jobId), kept);
-
-  cache.set(jobId, buildRecord(record.manifest, record.inputs, kept as JournalRow[]));
-  return dropped.size;
+  if (error) throw new Error(`Could not requeue those rows: ${error.message}`);
+  return data?.length ?? 0;
 }
 
-export function computeStats(jobId: string): JobStats {
-  const record = getJob(jobId);
-  if (!record) {
-    return {
-      total: 0,
-      pending: 0,
-      running: 0,
-      completed: 0,
-      succeeded: 0,
-      failed: 0,
-      successRate: null,
-      averageMs: null,
-      estimatedRemainingMs: null,
-      queueLength: 0,
-    };
+/* ---------------------------------------------------------------- helpers */
+
+function isValidId(jobId: string): boolean {
+  try {
+    assertJobId(jobId);
+    return true;
+  } catch {
+    return false;
   }
-
-  const rows = record.rows;
-  const succeeded = rows.filter((row) => row.status === 'success').length;
-  const failed = rows.filter((row) => row.status === 'failed').length;
-  const running = rows.filter((row) => row.status === 'running').length;
-  const completed = succeeded + failed;
-  const pending = rows.length - completed - running;
-
-  const timed = rows.filter((row) => typeof row.durationMs === 'number');
-  const averageMs = timed.length
-    ? Math.round(timed.reduce((sum, row) => sum + (row.durationMs ?? 0), 0) / timed.length)
-    : null;
-
-  // The throttle between products is real wall-clock time; leaving it out makes
-  // a 1000-item estimate hours too optimistic. It overlaps the idle-browsing
-  // burst rather than following it, so the gap costs the larger of the two, not
-  // their sum — and both are per worker.
-  const options = record.manifest.options;
-  const perProductMs =
-    averageMs === null ? null : averageMs + options.delayMs + options.delayJitterMs / 2;
-
-  // Workers run in parallel, so N of them retire the queue N times as fast.
-  // Without this the dashboard quotes a sequential ETA for a concurrent run and
-  // is wrong by exactly the concurrency factor.
-  //
-  // The divisor is the width the scraper will actually run at, not the number
-  // of workers on the manifest. Those differ on purpose: the pool holds itself
-  // to what the machine can render at once (see PoolWidth), so on a host with
-  // fewer cores than workers, dividing by the manifest figure would quote an
-  // ETA that no run on that host could ever meet. `averageMs` is measured under
-  // whatever width the run settled on, so the two agree.
-  const workers = Math.max(1, startingPoolWidth(Math.max(1, options.concurrency || 1)));
-
-  return {
-    total: rows.length,
-    pending,
-    running,
-    completed,
-    succeeded,
-    failed,
-    successRate: completed ? Math.round((succeeded / completed) * 1000) / 10 : null,
-    averageMs,
-    estimatedRemainingMs:
-      perProductMs === null ? null : Math.round((perProductMs * (pending + running)) / workers),
-    queueLength: pending,
-  };
-}
-
-/** Drop a cached index so the next read comes from disk. Used by crash recovery. */
-export function invalidate(jobId: string): void {
-  cache.delete(jobId);
 }

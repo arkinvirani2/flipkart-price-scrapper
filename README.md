@@ -4,8 +4,34 @@ Compares the price headlined on a Flipkart product page against a **specific sel
 price inside the "See other sellers" list.
 
 There are two ways to run it: a **CLI** (below, under "Usage") and a **web dashboard**
-(next section). Both drive the exact same scraper and share the same journal format — a
-batch started in one can be resumed by the other.
+(next section). Both drive the exact same scraper. The CLI keeps its own NDJSON journal on
+disk; the dashboard's batches live in Postgres and are scraped by a worker in GitHub
+Actions.
+
+## How it is deployed
+
+Three tiers that never share a process:
+
+```
+Browser ──HTTP──> Vercel  (Next.js UI + short-lived API routes)
+   │                 │
+   │                 ├──REST──> Supabase Postgres
+   │                 └──repository_dispatch──> GitHub Actions
+   │
+   └──WebSocket (anon key)──> Supabase Realtime  [jobs, job_results]
+
+GitHub Actions ──service-role──> Supabase Postgres
+        └── Playwright / Chromium  (the scraper, unchanged)
+```
+
+- **Supabase** is the record of truth. Batches, uploaded rows, results and recommendations
+  are tables; there is no shared filesystem and nothing authoritative in memory.
+- **GitHub Actions** is the scraper's runtime. It runs twice a day on a schedule, and the
+  dashboard's Start button pokes it awake. Nothing needs to stay on for a batch to run.
+- **Vercel** serves the UI and a handful of routes that read and write Supabase. Playwright
+  is not in that deployment at all.
+
+Setup instructions for all three are in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ```
 scraper/
@@ -23,9 +49,17 @@ scraper/
 
 ## Setup
 
+Node 20 or later.
+
 ```bash
-npm install            # also runs `playwright install chromium` via postinstall
+npm install
+npx playwright install chromium   # only if you want to run the scraper locally
+cp .env.example .env.local        # then fill in your Supabase project's values
 ```
+
+Chromium is no longer installed by a `postinstall` hook. It was being downloaded on every
+`npm install`, Vercel's build included, and the frontend has no use for it — the workflow
+installs it explicitly instead, with a cache.
 
 ## Dashboard
 
@@ -37,6 +71,11 @@ npm run dev            # http://localhost:3000  (development)
 # or
 npm run build && npm start   # production
 ```
+
+The dashboard needs a Supabase project to talk to, including in development — see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Starting a batch from a local dashboard still
+queues it for a GitHub Actions runner; to scrape it on this machine instead, run
+`npm run worker` against the same database.
 
 Then: **New batch** → enter the target seller → drop the seller listing XLS/XLSX → drop the minimum settlement XLS/XLSX → review → **Create batch** → **Start**.
 
@@ -53,12 +92,20 @@ Then: **New batch** → enter the target seller → drop the seller listing XLS/
    success %, average time, estimated remaining, queue length).
 3. **Live progress** — current product, step, per-product and batch progress bars,
    elapsed time, ETA, browser status, current seller and URL.
-4. **Controls** — Start · Pause · Resume · Stop.
-   - **Pause** lets the current product finish and be saved, then stops the queue.
-   - **Resume** continues from the first unfinished product; completed products are never
-     re-scraped. Rows that were `BLOCKED` are retried.
-   - **Stop** aborts immediately; the in-flight product is left pending (not recorded as a
-     failure) so a later resume scrapes it cleanly.
+4. **Controls** — Start · Pause · Resume · Stop. All four are *requests*: the scraper is on
+   another machine, so each one is written to the batch row and acted on when the worker
+   next looks. The dashboard shows that gap rather than hiding it.
+   - **Start / Resume** queues the batch and asks GitHub for a runner. A runner has to boot
+     and install Chromium first, so the batch sits in **Queued** for a minute or so.
+     Resume continues from the first unfinished product; completed products are never
+     re-scraped, and rows that ended `BLOCKED` are retried.
+   - **Pause** is seen within a few seconds. Workers stop taking new products and finish the
+     ones already in flight, so nothing nearly-done is thrown away — up to one product's
+     time on a wide pool. The batch shows **Pausing** until then.
+   - **Stop** is seen just as quickly and closes the browser contexts, which is what
+     releases a page parked inside a navigation wait. Products in flight are left pending
+     (not recorded as failures) so a later resume scrapes them cleanly. Fast, but not
+     instantaneous.
 5. **Queue** — virtualized table (handles thousands of rows), with filters for status, SKU,
    FSN, seller, URL, date, duration and failure reason, plus global search.
    - **Settlement** — three virtualized lists driven by the per-product bank-settlement
@@ -66,39 +113,68 @@ Then: **New batch** → enter the target seller → drop the seller listing XLS/
      currentBankSettlement + difference`. Rows land in **Main** (final ≥ threshold),
      **Below threshold** (final < threshold), or **Needs review** (not yet scraped, failed,
      or missing inputs — each with a reason). Any row opens its Flipkart Seller Hub listing.
-6. **Failed** — reason, failure screenshot (view/download), and per-row or bulk retry.
-7. **Logs** — timestamped, level-coded, searchable, filterable, downloadable.
-8. **Analytics** — outcome, scrape-time distribution, products per hour, failure reasons,
-   seller distribution.
-9. **Export** — CSV or XLSX with every scraper field; respects the active filters.
+6. **Failed** — failure status, the message explaining it, and per-row or bulk retry.
+   There are no failure screenshots: the worker runs on a GitHub Actions runner whose
+   filesystem is destroyed when the job ends, so a screenshot would have to be uploaded
+   somewhere to outlive the run, and that was deliberately not built. The status and
+   message are where the diagnosis lived anyway.
+7. **Analytics** — outcome, scrape-time distribution, products per hour, failure reasons,
+   seller distribution. All of it is one SQL call.
+8. **Export** — CSV or XLSX with every scraper field; respects the active filters.
+
+There is no Logs tab. Log lines go to the worker's stdout, which in GitHub Actions is the
+workflow run's console log — open the run from the Actions tab to read a batch's narrative.
+What survives a run in the database is the per-product `status` and `message`.
 
 ### Crash recovery
 
-The result journal is written to disk *before* the next product starts, so a browser
-crash, a server restart, or a power cut can only ever lose the single product that was
-in flight. On the next start the dashboard detects any batch that was mid-run, marks it
-**Interrupted**, and offers **Resume** — completed products are already safe.
+Every result is one committed row, written before the next product starts, so a worker that
+dies mid-batch loses only whatever was in flight.
+
+A running worker holds a **lease** on its batch and extends it every minute. A lease that
+stops being extended is, by definition, a worker that stopped — a cancelled workflow, a
+runner that ran out of memory, a job that hit its timeout. The next worker to start reaps
+those: the batch becomes **Interrupted** and the dashboard offers **Resume**. The lease is
+also what stops two runners writing results for one batch, since claiming is a conditional
+`UPDATE` that only one of them can win.
 
 ### Where dashboard data lives
 
-Under `data/jobs/<jobId>/` (git-ignored): `job.json` (manifest), `inputs.json` (the upload
-verbatim), `results.ndjson` (the same journal format the CLI uses), `logs.ndjson`, and
-`screenshots/`. Delete a batch from its page to remove the whole directory.
+Supabase Postgres. One row per batch in `jobs`, one per uploaded product in `job_inputs`,
+one per scraped result in `job_results`, one per recommendation in `recommendations`, and
+the learned per-FSN history in `fsn_intelligence`. Deleting a batch cascades to everything
+it wrote — except `fsn_intelligence`, which is authoritative and outlives it.
+
+The schema is in `supabase/migrations/`, in the order it should be applied.
 
 ### Deployment — read before hosting
 
-This is designed to **run on one long-lived Node host** (your machine, or a container on
-Railway / Render / Fly / a VPS). It is **not deployable to Vercel or any serverless
-platform**: Playwright needs a persistent process and a real Chromium binary, a
-1000-product batch runs for hours (far past any function timeout), and the crash-recovery
-guarantee depends on a durable local disk. One *job* runs at a time by design — two
-uncoordinated batches would multiply the request rate with nothing sharing their
-back-offs. Within a job the scraper runs up to `concurrency` workers (dashboard default 20,
-the maximum; CLI default 3) that share one block gate and are paced per worker. How many of
-them scrape *at once* is decided by the machine, not by the setting — see **Pool width**
-below. Keep the host awake for the length of a batch, and size the host for the pool — ten
-contexts is roughly 2 GB of Chromium, so a full twenty-worker pool wants ~4 GB free and
-cores to match.
+The dashboard deploys to Vercel and the scraper does not. That split is the whole design:
+Playwright needs a persistent process and a real Chromium binary, and a batch runs for tens
+of minutes — orders of magnitude past any serverless function timeout. So the scraper runs
+as a standalone worker in GitHub Actions, and the Vercel deployment contains no Playwright
+at all.
+
+One batch runs at a time, still by design: two uncoordinated batches would multiply the
+request rate from one address with nothing sharing their back-offs. That is enforced twice
+— the workflow's `concurrency: scraper` group stops a second runner booting, and
+`claim_job()` is a conditional `UPDATE` that only one runner can win even if two do.
+
+Within a batch the scraper runs up to `concurrency` workers (dashboard default 20; CLI
+default 3) that share one block gate and are paced per worker. How many of them scrape *at
+once* is decided by the machine, not the setting — see **Pool width** below. A GitHub
+runner is four cores and 16 GB shared with Chromium, and ten contexts is roughly 2 GB, so
+the worker clamps whatever the batch asks for to `WORKER_MAX_CONCURRENCY` (default 8, set
+in the workflow). Raising a pool past what the host can render does not make a batch finish
+sooner; measured, it retires *fewer* products per second and stretches each one, which is
+how machine load turns into `SELLER_LIST_LOAD_FAILED` rows.
+
+One risk worth knowing about up front: **Flipkart rate-limits and bot-walls by IP, and
+GitHub's runners use Azure datacentre addresses.** If batches start coming back full of
+`BLOCKED` rows, set the `PROXY_URL` secret to a residential proxy — the plumbing is already
+there and needs no code change. Until that happens, runs go out directly.
+
+Full setup — Supabase, Vercel, GitHub — is in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ## Usage
 
@@ -421,16 +497,35 @@ callers can branch on it.
 ## Project layout
 
 ```
-scraper/          the Playwright scraper — unchanged core, called by both CLI and dashboard
-  journal.ts      NDJSON journal + resume rule, shared by the CLI and the dashboard
+scraper/          the Playwright scraper — unchanged core, called by the CLI and the worker
+  journal.ts      NDJSON journal + resume rule, used by the CLI
+worker/           the standalone worker: claim a batch, scrape it, write to Supabase, exit
+  index.ts        entry point (npm run worker)
+  run.ts          the run itself — the port of the old in-process jobRunner
+  control.ts      polls requested_action, extends the lease
+  progress.ts     the throttled live-progress snapshot
+supabase/
+  migrations/     the schema, in the order it should be applied
 app/              Next.js App Router — dashboard pages and API routes
-components/        UI: dashboard, queue, charts, logs, upload, shadcn primitives
-lib/              store (job/log/paths), runner (jobRunner/eventBus), services, validation
-hooks/            React Query + SSE hooks
+components/       UI: dashboard, queue, charts, settlement, upload, shadcn primitives
+lib/
+  store/          jobStore, mappers, stats, ids, lease — all async over Supabase
+  supabase/       the two clients (service-role, browser anon) and the row types
+  services/       analytics, exports, recommendations, row filters, GitHub dispatch
+  intelligence/   the learning engine and its store
+hooks/            React Query + Supabase Realtime hooks
 types/            dashboard types (re-export the scraper's own)
-data/             per-batch job data (git-ignored)
+.github/workflows/scraper.yml   the scraper's runtime
+docs/DEPLOYMENT.md              Supabase / Vercel / GitHub setup
 ```
 
-The scraper is scoped to its own `tsconfig.scraper.json`; the CLI scripts (`npm run scrape`,
-`npm run verify`, `npm run typecheck:scraper`) use it, so the dashboard build never changes
-how the scraper compiles.
+Three TypeScript configs, because three things compile differently. `tsconfig.json` is the
+Next.js app. `tsconfig.scraper.json` scopes the scraper for the CLI (`npm run scrape`,
+`npm run verify`), so the dashboard build never changes how the scraper compiles.
+`tsconfig.worker.json` spans both, since the worker imports the scraper *and* the store.
+
+One constraint on all of them: anything that runs Playwright must run under **ts-node**, not
+an esbuild-based runner like tsx. esbuild's `keepNames` rewrites function expressions to
+reference a `__name` helper, and a function handed to `page.evaluate` is serialised and run
+inside Chromium where that helper does not exist. The failure is a `ReferenceError` thrown
+from the browser, a long way from its cause.

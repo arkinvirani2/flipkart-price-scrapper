@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useJobsRealtime } from '@/hooks/useJobsRealtime';
 import { api } from '@/lib/api';
 import type { JobSummary } from '@/lib/api';
 import { formatDateTime, formatDuration, formatPercent } from '@/lib/format';
@@ -27,12 +28,18 @@ export default function BatchesPage() {
   const queryClient = useQueryClient();
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Realtime is what actually keeps this current: a batch's state changes when
+  // a GitHub Actions runner picks it up, which no tab is watching for.
+  useJobsRealtime();
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['jobs'],
     queryFn: api.listJobs,
-    // Cheap poll so a batch started in another tab shows up. The heavy live
-    // updates come over SSE on the job page, not from here.
-    refetchInterval: 5_000,
+    // A slow fallback poll, not the primary mechanism. It covers the case where
+    // the Realtime socket cannot be established — a blocked WebSocket, or
+    // Supabase not configured — because a list that silently stops updating is
+    // worse than one that updates late.
+    refetchInterval: 30_000,
   });
 
   const jobs = data?.jobs ?? [];

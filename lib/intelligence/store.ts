@@ -1,28 +1,28 @@
 /**
  * Persistence for the per-FSN intelligence.
  *
- * Same principle as the rest of this app: plain files, no database. The layout
- * is sharded because the access pattern is "read and rewrite a few hundred FSNs
- * out of possibly tens of thousands":
+ * This was 32 JSON shards per account on disk. The sharding existed to answer
+ * "read and rewrite a few hundred FSNs out of possibly tens of thousands"
+ * without rewriting megabytes — which is a problem a table with a primary key
+ * does not have. So it is one row per `(account_slug, fsn)` now, and the shard
+ * arithmetic is gone.
  *
- *   data/intelligence/<account>/manifest.json   processed jobs, shard count
- *   data/intelligence/<account>/shard-NN.json   { fsn: FsnIntelligence }
+ * The bigger change is what this data *is*. It used to be derived: delete the
+ * directory and the next sync rebuilt it by replaying every job folder. That
+ * stops being true the moment batches are pruned (0005_retention.sql), because
+ * after a prune there is no journal left to replay. `fsn_intelligence` is
+ * therefore authoritative, has no foreign key to `jobs`, and is never cascaded.
+ * `resetAccount` still exists but is now a destructive, explicit action that
+ * can only rebuild from batches that are still retained.
  *
- * One file per account would mean rewriting megabytes to record one upload; one
- * file per FSN would mean tens of thousands of tiny files and a directory listing
- * that takes longer than the work. Thirty-two shards keeps each file in the tens
- * of kilobytes and means an upload rewrites only the shards it actually touched.
- *
- * Everything here is derived data. If the whole directory is deleted it rebuilds
- * itself from the job folders on the next run, which is also how a corrupt shard
- * heals — there is no state here that is not reproducible from the journals.
+ * The engine itself (engine.ts, formulas.ts, metrics.ts) is untouched: records
+ * are loaded, mutated in memory exactly as before, then written back.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { computeSettlement } from '@/lib/settlement';
-import { getRows, listJobs, sameAccount } from '@/lib/store/jobStore';
-import { dataDir } from '@/lib/store/paths';
+import { getAllRows, listJobs, sameAccount } from '@/lib/store/jobStore';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import type { FsnIntelligenceDb } from '@/lib/supabase/types';
 import { processObservation, type UploadDecision } from './engine';
 import {
   DEFAULT_INTELLIGENCE_CONFIG,
@@ -32,186 +32,131 @@ import {
   type Observation,
 } from './types';
 
-const SHARD_COUNT = 32;
-const VERSION = 1;
-
-interface Manifest {
-  version: number;
-  accountName: string;
-  shardCount: number;
-  /** Jobs already folded in. The idempotency guard for ingestion. */
-  processedJobIds: string[];
-  fsnCount: number;
-  updatedAt: string;
-}
-
-interface AccountStore {
-  slug: string;
-  accountName: string;
-  manifest: Manifest;
-  shards: Map<number, Record<string, FsnIntelligence>>;
-  dirty: Set<number>;
-  manifestDirty: boolean;
-  processed: Set<string>;
-}
-
-/** Pinned to globalThis so Next's dev-mode reloading cannot hand out a second cache. */
-const cache: Map<string, AccountStore> =
-  ((globalThis as Record<string, unknown>).__fsnIntelligence as Map<string, AccountStore>) ??
-  new Map<string, AccountStore>();
-(globalThis as Record<string, unknown>).__fsnIntelligence = cache;
-
-/* ----------------------------------------------------------------- paths */
-
-export function intelligenceDir(): string {
-  return join(dataDir(), 'intelligence');
-}
+/** How many FSNs to read back or write in one request. */
+const CHUNK = 500;
 
 /**
- * A filesystem-safe folder name for an account.
+ * A stable key for an account.
  *
  * Normalised the same way account matching is, so "Shoppping Dil Se" and
  * "ShopppingDilSe" share one store rather than quietly keeping two histories.
+ * It named a directory before; it is a primary key column now, and it must not
+ * change meaning — the records are keyed on it.
  */
 export function accountSlug(accountName: string): string {
   const normalized = accountName.toLowerCase().replace(/[^a-z0-9]+/g, '');
   return normalized || 'unassigned';
 }
 
-function accountPath(slug: string): string {
-  return join(intelligenceDir(), slug);
+function toRow(slug: string, accountName: string, record: FsnIntelligence): FsnIntelligenceDb {
+  const top = record.ranking[0] ?? null;
+
+  return {
+    account_slug: slug,
+    fsn: record.fsn,
+    account_name: accountName,
+    record,
+    // Denormalised so the leaderboard is an ORDER BY instead of loading every
+    // record into Node and sorting there, which is what the old route did.
+    champion: record.champion,
+    accuracy_pct: top?.accuracyPct ?? null,
+    average_error: top?.mae ?? null,
+    observations_count: record.observations.length,
+    updated_at: record.updatedAt,
+  };
 }
 
-/** FNV-1a: a tiny, stable, dependency-free hash. Shard placement must never move. */
-function shardOf(fsn: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < fsn.length; i += 1) {
-    hash ^= fsn.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash % SHARD_COUNT;
+function fromRow(row: FsnIntelligenceDb): FsnIntelligence {
+  return row.record as FsnIntelligence;
+}
+
+/* ----------------------------------------------------------------- reads */
+
+export async function readRecord(accountName: string, fsn: string): Promise<FsnIntelligence | null> {
+  const { data, error } = await supabaseAdmin()
+    .from('fsn_intelligence')
+    .select('*')
+    .eq('account_slug', accountSlug(accountName))
+    .eq('fsn', fsn)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return fromRow(data as FsnIntelligenceDb);
 }
 
 /**
- * Write through a temporary file.
+ * Every FSN this account has learned about, best first.
  *
- * A half-written shard would be unreadable JSON, and the whole point of this
- * store is that it survives the process dying mid-batch. Rename is atomic enough
- * on every filesystem this runs on: a reader sees either the old file or the new
- * one, never a torn one.
+ * `limit` is applied in SQL. The old version read all 32 shards into memory,
+ * mapped, sorted and sliced — so asking for the top 500 of 20,000 FSNs cost the
+ * same as asking for all of them.
  */
-function writeAtomic(path: string, contents: string): void {
-  const temporary = `${path}.tmp`;
-  writeFileSync(temporary, contents, 'utf8');
-  renameSync(temporary, path);
+export async function leaderboard(accountName: string, limit = 500): Promise<FsnIntelligence[]> {
+  const { data, error } = await supabaseAdmin()
+    .from('fsn_intelligence')
+    .select('*')
+    .eq('account_slug', accountSlug(accountName))
+    .order('accuracy_pct', { ascending: false, nullsFirst: false })
+    .limit(Math.min(Math.max(limit, 1), 5_000));
+
+  if (error || !data) return [];
+  return (data as FsnIntelligenceDb[]).map(fromRow);
 }
 
-/* ------------------------------------------------------------ load/save */
-
-function loadAccount(accountName: string): AccountStore {
+/** Everything, paged through. Used by the formula repository view. */
+export async function allRecords(accountName: string): Promise<FsnIntelligence[]> {
+  const db = supabaseAdmin();
   const slug = accountSlug(accountName);
-  const cached = cache.get(slug);
-  if (cached) return cached;
+  const records: FsnIntelligence[] = [];
 
-  const directory = accountPath(slug);
-  mkdirSync(directory, { recursive: true });
+  for (let offset = 0; ; offset += CHUNK) {
+    const { data, error } = await db
+      .from('fsn_intelligence')
+      .select('*')
+      .eq('account_slug', slug)
+      .order('fsn', { ascending: true })
+      .range(offset, offset + CHUNK - 1);
 
-  let manifest: Manifest = {
-    version: VERSION,
-    accountName,
-    shardCount: SHARD_COUNT,
-    processedJobIds: [],
-    fsnCount: 0,
-    updatedAt: new Date().toISOString(),
-  };
+    if (error) throw new Error(`Could not read intelligence: ${error.message}`);
 
-  const manifestPath = join(directory, 'manifest.json');
-  if (existsSync(manifestPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as Manifest;
-      // A shard-count change would send every FSN to a different file, so an
-      // older layout is discarded and rebuilt rather than half-read.
-      if (parsed.version === VERSION && parsed.shardCount === SHARD_COUNT) manifest = parsed;
-    } catch {
-      // Unreadable manifest: rebuild from the job folders on the next sync.
-    }
+    const batch = (data ?? []) as FsnIntelligenceDb[];
+    records.push(...batch.map(fromRow));
+    if (batch.length < CHUNK) break;
   }
 
-  const store: AccountStore = {
-    slug,
-    accountName,
-    manifest,
-    shards: new Map(),
-    dirty: new Set(),
-    manifestDirty: false,
-    processed: new Set(manifest.processedJobIds),
-  };
-
-  cache.set(slug, store);
-  return store;
+  return records;
 }
 
-function loadShard(store: AccountStore, index: number): Record<string, FsnIntelligence> {
-  const cached = store.shards.get(index);
-  if (cached) return cached;
+export async function countRecords(accountName: string): Promise<number> {
+  const { count } = await supabaseAdmin()
+    .from('fsn_intelligence')
+    .select('fsn', { count: 'exact', head: true })
+    .eq('account_slug', accountSlug(accountName));
 
-  const path = join(accountPath(store.slug), `shard-${String(index).padStart(2, '0')}.json`);
-  let shard: Record<string, FsnIntelligence> = {};
-
-  if (existsSync(path)) {
-    try {
-      shard = JSON.parse(readFileSync(path, 'utf8')) as Record<string, FsnIntelligence>;
-    } catch {
-      // A torn shard costs this account's learning for those FSNs and nothing
-      // else; it refills as uploads arrive.
-      shard = {};
-    }
-  }
-
-  store.shards.set(index, shard);
-  return shard;
+  return count ?? 0;
 }
 
-export function getRecord(store: AccountStore, fsn: string): FsnIntelligence {
-  const index = shardOf(fsn);
-  const shard = loadShard(store, index);
-  const existing = shard[fsn];
-  if (existing) return existing;
+export async function processedJobIds(accountName: string): Promise<string[]> {
+  const { data, error } = await supabaseAdmin()
+    .from('intelligence_processed_jobs')
+    .select('job_id')
+    .eq('account_slug', accountSlug(accountName));
 
-  const created = emptyIntelligence(fsn, store.accountName);
-  shard[fsn] = created;
-  store.dirty.add(index);
-  return created;
-}
-
-function touch(store: AccountStore, fsn: string): void {
-  store.dirty.add(shardOf(fsn));
-}
-
-/** Write only what changed. The reason an upload of 150 rows is a few small writes. */
-export function flush(store: AccountStore): void {
-  const directory = accountPath(store.slug);
-  mkdirSync(directory, { recursive: true });
-
-  for (const index of store.dirty) {
-    const shard = store.shards.get(index);
-    if (!shard) continue;
-    writeAtomic(
-      join(directory, `shard-${String(index).padStart(2, '0')}.json`),
-      JSON.stringify(shard),
-    );
-  }
-  store.dirty.clear();
-
-  if (store.manifestDirty) {
-    store.manifest.processedJobIds = [...store.processed];
-    store.manifest.updatedAt = new Date().toISOString();
-    writeAtomic(join(directory, 'manifest.json'), JSON.stringify(store.manifest, null, 2));
-    store.manifestDirty = false;
-  }
+  if (error || !data) return [];
+  return (data as { job_id: string }[]).map((row) => row.job_id);
 }
 
 /* ---------------------------------------------------------------- ingest */
+
+export interface SyncReport {
+  accountName: string;
+  accountSlug: string;
+  /** Batches folded in during *this* call. Empty when there was nothing new. */
+  newlyProcessed: string[];
+  processedCount: number;
+  fsnCount: number;
+  decisions: Map<string, Map<string, UploadDecision>>;
+}
 
 /**
  * Fold every upload this account has, in chronological order, into the store.
@@ -220,40 +165,45 @@ export function flush(store: AccountStore): void {
  * against upload 5, never the reverse. Replaying out of order would produce a
  * different — and wrong — set of coefficients.
  *
- * Already-processed jobs are skipped, so this is safe to call on every run and
- * cheap when there is nothing new. On a fresh store it backfills the entire
- * history in one pass.
+ * Already-processed batches are skipped, so this is safe to call on every run
+ * and cheap when there is nothing new. `intelligence_processed_jobs` is the
+ * guard, and it deliberately has no foreign key to `jobs`: once a batch has
+ * been folded in, pruning it must not make the store willing to add it again.
  */
-export function syncAccount(
+export async function syncAccount(
   accountName: string,
   config: IntelligenceConfig = DEFAULT_INTELLIGENCE_CONFIG,
-): { store: AccountStore; decisions: Map<string, Map<string, UploadDecision>> } {
-  const store = loadAccount(accountName);
-  const decisions = new Map<string, Map<string, UploadDecision>>();
+): Promise<SyncReport> {
+  const db = supabaseAdmin();
+  const slug = accountSlug(accountName);
 
-  const jobs = listJobs()
+  const processed = new Set(await processedJobIds(accountName));
+
+  const jobs = (await listJobs())
     .filter((manifest) => sameAccount(manifest.accountName, accountName))
     .sort((left, right) =>
       (left.uploadTime ?? left.createdAt).localeCompare(right.uploadTime ?? right.createdAt),
     );
 
+  const decisions = new Map<string, Map<string, UploadDecision>>();
+  const newlyProcessed: string[] = [];
+
   for (const manifest of jobs) {
-    if (store.processed.has(manifest.id)) continue;
+    if (processed.has(manifest.id)) continue;
 
     const uploadTime = manifest.uploadTime ?? manifest.createdAt;
-    const perFsn = new Map<string, UploadDecision>();
+    const rows = await getAllRows(manifest.id, { status: ['success'] });
+
     // One upload can legitimately list the same FSN under two SKUs; the first
     // one wins so a single upload contributes a single observation.
-    const seen = new Set<string>();
-
-    for (const row of getRows(manifest.id)) {
-      if (!row.result || row.result.status !== 'OK' || seen.has(row.fsn)) continue;
+    const observations = new Map<string, Observation>();
+    for (const row of rows) {
+      if (!row.result || row.result.status !== 'OK' || observations.has(row.fsn)) continue;
 
       const settlement = computeSettlement(row);
       if (settlement.sellerPrice === null || settlement.currentPrice === null) continue;
-      seen.add(row.fsn);
 
-      const observation: Observation = {
+      observations.set(row.fsn, {
         jobId: manifest.id,
         t: uploadTime,
         myPrice: settlement.sellerPrice,
@@ -261,66 +211,110 @@ export function syncAccount(
         hasBuybox: settlement.hasBuybox,
         currentSettlement: settlement.currentBankSettlement,
         minSettlement: settlement.bankSettlementThreshold,
-      };
-
-      const record = getRecord(store, row.fsn);
-      perFsn.set(row.fsn, processObservation(record, observation, config));
-      touch(store, row.fsn);
+      });
     }
 
+    const fsns = [...observations.keys()];
+    const existing = await loadRecords(slug, fsns);
+    const perFsn = new Map<string, UploadDecision>();
+    const touched: FsnIntelligence[] = [];
+
+    for (const [fsn, observation] of observations) {
+      const record = existing.get(fsn) ?? emptyIntelligence(fsn, accountName);
+      perFsn.set(fsn, processObservation(record, observation, config));
+      touched.push(record);
+    }
+
+    await writeRecords(slug, accountName, touched);
+
+    // The marker goes in only after the records are written. Reversing the two
+    // would let a failure halfway through mark a batch as folded in when it was
+    // not, and the observations it carried could never be recovered.
+    const { error } = await db
+      .from('intelligence_processed_jobs')
+      .upsert({ account_slug: slug, job_id: manifest.id }, { onConflict: 'account_slug,job_id' });
+
+    if (error) throw new Error(`Could not record intelligence progress: ${error.message}`);
+
+    processed.add(manifest.id);
+    newlyProcessed.push(manifest.id);
     decisions.set(manifest.id, perFsn);
-    store.processed.add(manifest.id);
-    store.manifestDirty = true;
   }
 
-  store.manifest.fsnCount = countFsns(store);
-  flush(store);
-
-  return { store, decisions };
+  return {
+    accountName,
+    accountSlug: slug,
+    newlyProcessed,
+    processedCount: processed.size,
+    fsnCount: await countRecords(accountName),
+    decisions,
+  };
 }
 
-function countFsns(store: AccountStore): number {
-  let total = 0;
-  for (const shard of store.shards.values()) total += Object.keys(shard).length;
-  return Math.max(total, store.manifest.fsnCount);
+async function loadRecords(slug: string, fsns: string[]): Promise<Map<string, FsnIntelligence>> {
+  const db = supabaseAdmin();
+  const found = new Map<string, FsnIntelligence>();
+
+  for (let start = 0; start < fsns.length; start += CHUNK) {
+    const chunk = fsns.slice(start, start + CHUNK);
+    const { data, error } = await db
+      .from('fsn_intelligence')
+      .select('*')
+      .eq('account_slug', slug)
+      .in('fsn', chunk);
+
+    if (error) throw new Error(`Could not read intelligence: ${error.message}`);
+    for (const row of (data ?? []) as FsnIntelligenceDb[]) found.set(row.fsn, fromRow(row));
+  }
+
+  return found;
 }
+
+async function writeRecords(
+  slug: string,
+  accountName: string,
+  records: FsnIntelligence[],
+): Promise<void> {
+  if (records.length === 0) return;
+
+  const db = supabaseAdmin();
+
+  for (let start = 0; start < records.length; start += CHUNK) {
+    const chunk = records.slice(start, start + CHUNK).map((record) => toRow(slug, accountName, record));
+    const { error } = await db
+      .from('fsn_intelligence')
+      .upsert(chunk, { onConflict: 'account_slug,fsn' });
+
+    if (error) throw new Error(`Could not save intelligence: ${error.message}`);
+  }
+}
+
+/* ----------------------------------------------------------------- reset */
 
 /**
- * Throw the account's learning away so the next sync rebuilds it from scratch.
+ * Throw the account's learning away so the next sync rebuilds it.
  *
- * Needed whenever history changes shape underneath the store — a batch deleted,
- * rows re-scraped — because the accumulators are sums that cannot be un-added.
+ * Destructive, and no longer free. The accumulators are running sums that
+ * cannot be un-added, so this used to be the honest response to history
+ * changing shape — a batch deleted, rows re-scraped — because the whole store
+ * could be regenerated from the job folders.
+ *
+ * Under retention it can only replay the batches still retained. Everything
+ * learned from a pruned batch is gone for good. That is why deleting a batch no
+ * longer calls this: it is now an explicit action a person takes, with the
+ * consequence stated, rather than a side effect of tidying up.
  */
-export function resetAccount(accountName: string): void {
+export async function resetAccount(accountName: string): Promise<void> {
+  const db = supabaseAdmin();
   const slug = accountSlug(accountName);
-  cache.delete(slug);
-  rmSync(accountPath(slug), { recursive: true, force: true });
-}
 
-/* ---------------------------------------------------------------- reads */
+  const { error } = await db.from('fsn_intelligence').delete().eq('account_slug', slug);
+  if (error) throw new Error(`Could not reset intelligence: ${error.message}`);
 
-export function readAccount(accountName: string): AccountStore {
-  return loadAccount(accountName);
-}
+  const { error: markerError } = await db
+    .from('intelligence_processed_jobs')
+    .delete()
+    .eq('account_slug', slug);
 
-export function readRecord(accountName: string, fsn: string): FsnIntelligence | null {
-  const store = loadAccount(accountName);
-  const shard = loadShard(store, shardOf(fsn));
-  return shard[fsn] ?? null;
-}
-
-/** Every FSN this account has learned about. Loads all shards, so callers page it. */
-export function allRecords(accountName: string): FsnIntelligence[] {
-  const store = loadAccount(accountName);
-  const directory = accountPath(store.slug);
-  if (!existsSync(directory)) return [];
-
-  const records: FsnIntelligence[] = [];
-  for (const file of readdirSync(directory)) {
-    const match = /^shard-(\d+)\.json$/.exec(file);
-    if (!match) continue;
-    for (const record of Object.values(loadShard(store, Number(match[1])))) records.push(record);
-  }
-
-  return records;
+  if (markerError) throw new Error(`Could not reset intelligence progress: ${markerError.message}`);
 }

@@ -11,7 +11,6 @@ import { LiveProgressPanel } from '@/components/dashboard/LiveProgressPanel';
 import { StatGrid } from '@/components/dashboard/StatGrid';
 import { JobStateBadge } from '@/components/dashboard/StatusBadge';
 import { FailedProducts } from '@/components/failed/FailedProducts';
-import { LogViewer } from '@/components/logs/LogViewer';
 import { EMPTY_FILTERS, FilterBar, type QueueFilters } from '@/components/queue/FilterBar';
 import { ExportButtons } from '@/components/queue/ExportButtons';
 import { QueueTable } from '@/components/queue/QueueTable';
@@ -31,9 +30,11 @@ export default function JobDetailPage() {
   const router = useRouter();
 
   const [banner, setBanner] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [filters, setFilters] = useState<QueueFilters>(EMPTY_FILTERS);
 
-  // Snapshot from the server; the SSE stream keeps state/stats/progress current.
+  // Snapshot from the server; the Realtime subscription keeps state, stats and
+  // progress current from there.
   const detail = useQuery({
     queryKey: ['job', jobId],
     queryFn: () => api.getJob(jobId),
@@ -100,7 +101,14 @@ export default function JobDetailPage() {
               </Link>
             </Button>
           )}
-          <ControlBar jobId={jobId} state={state} stats={stats} blockedBy={blockedBy} onError={setBanner} />
+          <ControlBar
+            jobId={jobId}
+            state={state}
+            stats={stats}
+            blockedBy={blockedBy}
+            onError={setBanner}
+            onNotice={setNotice}
+          />
           {!isRunning && (
             <Button
               variant="ghost"
@@ -126,12 +134,32 @@ export default function JobDetailPage() {
         </Alert>
       )}
 
+      {notice && !banner && (
+        <Alert>
+          <AlertTitle>Request sent</AlertTitle>
+          <AlertDescription>{notice}</AlertDescription>
+        </Alert>
+      )}
+
+      {state === 'queued' && stats.pending > 0 && (
+        <Alert>
+          <AlertTitle>Waiting for a runner</AlertTitle>
+          <AlertDescription>
+            The scraper runs on GitHub Actions, not in this browser or on this server. A runner has
+            to start up and install Chromium before it picks this batch up, which usually takes a
+            minute or two. This page updates itself when it does — nothing needs to stay open.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {state === 'interrupted' && (
         <Alert variant="warning">
           <AlertTitle>This batch was interrupted</AlertTitle>
           <AlertDescription>
-            The server stopped mid-run. All {stats.completed} completed products are saved — press
-            Resume to scrape the remaining {stats.pending}.
+            The worker stopped reporting mid-run — a cancelled workflow, or a runner that ran out of
+            memory or time. All {stats.completed} completed products are saved; press Resume to
+            scrape the remaining {stats.pending}. The products that were in flight were never
+            recorded, so they are still pending.
           </AlertDescription>
         </Alert>
       )}
@@ -147,7 +175,6 @@ export default function JobDetailPage() {
           <TabsTrigger value="failed">
             Failed{stats.failed > 0 ? ` (${stats.failed})` : ''}
           </TabsTrigger>
-          <TabsTrigger value="logs">Logs</TabsTrigger>
           <TabsTrigger value="analytics">Analytics</TabsTrigger>
         </TabsList>
 
@@ -176,10 +203,6 @@ export default function JobDetailPage() {
 
         <TabsContent value="failed">
           <FailedProducts jobId={jobId} canRetry={!isRunning} />
-        </TabsContent>
-
-        <TabsContent value="logs">
-          <LogViewer jobId={jobId} liveLogs={stream.logs} />
         </TabsContent>
 
         <TabsContent value="analytics">

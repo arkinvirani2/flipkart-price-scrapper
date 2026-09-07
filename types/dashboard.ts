@@ -179,7 +179,6 @@ export interface JobRow {
   durationMs?: number;
   attempts?: number;
   message?: string;
-  screenshotPath?: string;
   finishedAt?: string;
   /** Per-product settlement inputs, carried straight through from the inputs file. */
   currentBankSettlement?: number;
@@ -231,31 +230,22 @@ export interface LiveProgress {
 
 /* -------------------------------------------------------------------- logs */
 
+/**
+ * Severity of a worker log line.
+ *
+ * Still used by the scraper's log sink, which the worker prints to stdout so
+ * the lines land in the GitHub Actions console. They are no longer persisted:
+ * there is no job_logs table and no Logs tab. What survives a run is the
+ * per-product `status` and `message` on each result row, which is where the
+ * diagnosis actually lived.
+ */
 export type LogLevel = 'step' | 'info' | 'warn' | 'error';
 
-export interface LogEntry {
-  id: number;
-  ts: string;
-  jobId: string;
-  level: LogLevel;
-  message: string;
-  sku?: string;
-  fsn?: string;
-  seller?: string;
-  rowIndex?: number;
-  /** Execution time of the product this line closed, when it closed one. */
-  durationMs?: number;
-}
-
-/* ------------------------------------------------------------------ events */
-
-/** Server-sent event payloads. One union so the client can switch exhaustively. */
-export type JobEvent =
-  | { type: 'state'; jobId: string; state: JobState; stats: JobStats }
-  // An array, not a single slot: with a worker pool there are several products
-  // in flight at once, and collapsing them onto one slot would show whichever
-  // worker reported last while hiding the other two.
-  | { type: 'progress'; progress: LiveProgress[] }
-  | { type: 'row'; jobId: string; row: JobRow; stats: JobStats }
-  | { type: 'log'; entry: LogEntry }
-  | { type: 'heartbeat'; ts: string };
+/*
+ * There is no JobEvent union any more.
+ *
+ * It described the frames of an in-process SSE bus that only worked while the
+ * scraper and the dashboard shared a Node process. The browser now subscribes
+ * to Supabase Realtime on `jobs` and `job_results` directly, so the wire format
+ * is the table row — see hooks/useJobStream.ts.
+ */

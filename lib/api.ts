@@ -12,7 +12,6 @@ import type {
   JobState,
   JobStats,
   LiveProgress,
-  LogEntry,
   ScrapeInput,
 } from '@/types/dashboard';
 import type { ValidationReport } from '@/lib/validation/uploadSchema';
@@ -114,8 +113,28 @@ export const api = {
 
   deleteJob: (jobId: string) => request<{ deleted: boolean }>(`/api/jobs/${jobId}`, { method: 'DELETE' }),
 
+  /**
+   * Ask for a state change.
+   *
+   * None of these actions performs the thing itself any more — the scraper is
+   * in GitHub Actions. Start queues the batch and pokes a runner; Pause and
+   * Stop record what the user wants and the worker acts on it when it next
+   * looks. `note` is the plain-language version of that gap, meant to be shown.
+   *
+   * `dispatched: false` on a start is not a failure: the batch is queued either
+   * way, and the twice-daily scheduled run will pick it up. It only means the
+   * runner was not woken early.
+   */
   control: (jobId: string, action: 'start' | 'resume' | 'pause' | 'stop') =>
-    request<{ ok: true; pending?: number; stats: JobStats }>(`/api/jobs/${jobId}/control`, {
+    request<{
+      ok: true;
+      pending?: number;
+      queued?: boolean;
+      dispatched?: boolean;
+      state?: JobState;
+      note?: string;
+      stats: JobStats;
+    }>(`/api/jobs/${jobId}/control`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     }),
@@ -123,11 +142,6 @@ export const api = {
   rows: (jobId: string, params: URLSearchParams) =>
     request<{ rows: JobRow[]; total: number; matched: number; offset: number; limit: number }>(
       `/api/jobs/${jobId}/rows?${params.toString()}`,
-    ),
-
-  logs: (jobId: string, params?: URLSearchParams) =>
-    request<{ entries: LogEntry[]; total: number }>(
-      `/api/jobs/${jobId}/logs${params ? `?${params.toString()}` : ''}`,
     ),
 
   analytics: (jobId: string) => request<AnalyticsPayload>(`/api/jobs/${jobId}/analytics`),

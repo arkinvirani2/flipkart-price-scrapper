@@ -381,6 +381,10 @@ async function launchBrowser(options: ResolvedOptions): Promise<Browser> {
   return chromium.launch({
     headless: options.headless,
     args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    // Set at the browser, not per context: every worker shares one browser, and
+    // splitting them across exits would only make the traffic look stranger,
+    // not less. Undefined is the normal case and means a direct connection.
+    proxy: options.proxy,
   });
 }
 
