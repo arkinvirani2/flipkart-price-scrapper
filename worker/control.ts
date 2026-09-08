@@ -5,6 +5,8 @@
  * API route set directly, because the route and the runner were the same
  * process. They are now a column the dashboard writes and this polls.
  *
+ * 
+ * 
  * That poll is the honest part of the design. It costs one small SELECT every
  * few seconds, and it is why the UI shows `pausing` and `stopping` as states
  * rather than pretending the batch has already stopped:
