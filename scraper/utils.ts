@@ -157,6 +157,9 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // Three concurrent contexts. Measured against a 202-product batch without a
   // single block; raise it only with the same evidence in hand.
   concurrency: 3,
+  // Let the machine size the pool. `concurrency` is a ceiling under this, not a
+  // target; set false to run exactly `concurrency` products at once instead.
+  adaptiveConcurrency: true,
   blockResources: true,
   verbose: true,
   // Zero keeps single-product and small-batch runs exactly as fast as before.

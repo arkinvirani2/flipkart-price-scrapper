@@ -106,3 +106,18 @@ export function logFilePath(jobId: string): string {
 export function clearLogBuffer(jobId: string): void {
   state.buffers.delete(jobId);
 }
+
+/**
+ * Drop every resident log line, for a full reset.
+ *
+ * The ring buffers are keyed by job id and nothing prunes them when a job's
+ * directory is deleted, so a reset that only removed files would leave the last
+ * two thousand lines of every wiped batch answering `recentLogs` until the
+ * server restarted. `nextId` restarts too: the ids are only ever used to order
+ * and de-duplicate lines within a viewer session, and a fresh start should read
+ * from one.
+ */
+export function clearAllLogs(): void {
+  state.buffers.clear();
+  state.nextId = 1;
+}

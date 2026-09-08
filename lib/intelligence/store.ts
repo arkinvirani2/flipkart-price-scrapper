@@ -297,6 +297,21 @@ export function resetAccount(accountName: string): void {
   rmSync(accountPath(slug), { recursive: true, force: true });
 }
 
+/**
+ * Forget every account's learned history.
+ *
+ * Counted before the tree goes so the reset can report what it actually threw
+ * away — this store is the only thing in `data/` that outlives the batch that
+ * produced it, so "3 accounts" is the number a user checks the result against.
+ */
+export function resetAllAccounts(): number {
+  const directory = intelligenceDir();
+  const accounts = existsSync(directory) ? readdirSync(directory).length : 0;
+  cache.clear();
+  rmSync(directory, { recursive: true, force: true });
+  return accounts;
+}
+
 /* ---------------------------------------------------------------- reads */
 
 export function readAccount(accountName: string): AccountStore {

@@ -42,6 +42,7 @@ interface CliArgs {
   maxShowMore?: number;
   network: boolean;
   concurrency?: number;
+  fixedConcurrency: boolean;
   noBlockResources: boolean;
   screenshotDir?: string;
   delay?: number;
@@ -59,6 +60,7 @@ function parseArgs(argv: string[]): CliArgs {
     headed: false,
     quiet: false,
     network: false,
+    fixedConcurrency: false,
     noBlockResources: false,
     resume: false,
     noHuman: false,
@@ -82,6 +84,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--max-show-more': args.maxShowMore = Number(next()); break;
       case '--network': args.network = true; break;
       case '--concurrency': args.concurrency = Number(next()); break;
+      case '--fixed-concurrency': args.fixedConcurrency = true; break;
       case '--no-block-resources': args.noBlockResources = true; break;
       case '--screenshot-dir': args.screenshotDir = next(); break;
       case '--delay': args.delay = Number(next()); break;
@@ -134,6 +137,14 @@ Flipkart seller price comparison
   Speed:
     --concurrency <n>     Products scraped at once, each in its own context.
                           Default 3. Use 1 for strictly sequential behaviour.
+                          Normally a ceiling: the pool opens at the machine's core
+                          count and sizes itself on measured throughput.
+    --fixed-concurrency   Run exactly --concurrency products at once for the whole
+                          batch instead of letting the pool size itself. Use when
+                          the host has headroom the controller cannot see — a
+                          network-bound run, most often. An over-wide fixed pool
+                          stretches products toward their timeouts, so raise it
+                          against a failure count, not a stopwatch.
     --no-block-resources  Load images, media and fonts too. They are dropped by
                           default; nothing the scraper reads comes from them.
     --no-buybox-probe     Render every product page instead of first reading the
@@ -162,6 +173,7 @@ function toOptions(args: CliArgs): ScraperOptions {
     maxShowMoreClicks: args.maxShowMore,
     useNetworkCapture: args.network,
     concurrency: args.concurrency,
+    adaptiveConcurrency: !args.fixedConcurrency,
     blockResources: !args.noBlockResources,
     screenshotOnFailureDir: args.screenshotDir,
     delayMs: args.delay,

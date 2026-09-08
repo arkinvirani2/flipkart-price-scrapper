@@ -165,6 +165,24 @@ export interface ScraperOptions {
    * nothing else.
    */
   buyboxProbe?: boolean;
+  /**
+   * Let the pool decide how many of its workers may scrape at once, rather than
+   * running all of them.
+   *
+   * On by default, and on that setting `concurrency` is a ceiling: the pool
+   * opens at the machine's core count and hill-climbs on measured throughput,
+   * which on an eight-core host asked for twenty workers typically settles
+   * somewhere in the high single digits. That is usually the faster answer, and
+   * always the safer one — see PoolWidth.
+   *
+   * Set false to pin the pool at `concurrency` for the whole batch, so twenty
+   * workers means twenty products in flight from the first round to the last.
+   * Worth doing when the operator knows the host has headroom the controller
+   * cannot see, most obviously when the run is network-bound: waiting on
+   * Flipkart costs no CPU, but it does raise the median product time the
+   * controller reads as saturation.
+   */
+  adaptiveConcurrency?: boolean;
   /** Emit progress logs. */
   verbose?: boolean;
   /** Playwright storageState path, for a logged-in session if you need one. */

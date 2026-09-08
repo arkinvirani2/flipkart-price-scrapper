@@ -53,3 +53,15 @@ export function publish(jobId: string, event: JobEvent): void {
 export function subscriberCount(channel: string): number {
   return state.listeners.get(channel)?.size ?? 0;
 }
+
+/**
+ * Forget every subscriber.
+ *
+ * Used by the full reset, where the jobs those SSE streams are watching no
+ * longer exist. The connections themselves are not closed here — the browser is
+ * about to reload — but they must stop receiving events for batches that have
+ * been deleted, or a stale stream would repopulate a viewer that just reset.
+ */
+export function clearSubscribers(): void {
+  state.listeners.clear();
+}

@@ -251,6 +251,23 @@ export function deleteJob(jobId: string): boolean {
   return true;
 }
 
+/**
+ * Delete every batch: the directories and the in-memory index together.
+ *
+ * The whole `jobs` tree goes in one `rmSync` rather than a loop over
+ * `deleteJob`, because a half-purged tree is a worse state than either end of
+ * the operation — a manifest whose journal has already gone reads back as a
+ * batch with a thousand pending rows. Recreated empty afterwards so the next
+ * upload does not have to.
+ */
+export function deleteAllJobs(): number {
+  const removed = listJobs().length;
+  rmSync(jobsDir(), { recursive: true, force: true });
+  cache.clear();
+  ensureDataDir();
+  return removed;
+}
+
 /* --------------------------------------------------------------- mutation */
 
 /** Patch the manifest on disk and in the index. The one place job.json is edited. */
@@ -438,12 +455,20 @@ export function computeStats(jobId: string): JobStats {
   // is wrong by exactly the concurrency factor.
   //
   // The divisor is the width the scraper will actually run at, not the number
-  // of workers on the manifest. Those differ on purpose: the pool holds itself
-  // to what the machine can render at once (see PoolWidth), so on a host with
-  // fewer cores than workers, dividing by the manifest figure would quote an
-  // ETA that no run on that host could ever meet. `averageMs` is measured under
-  // whatever width the run settled on, so the two agree.
-  const workers = Math.max(1, startingPoolWidth(Math.max(1, options.concurrency || 1)));
+  // of workers on the manifest. Under an adaptive pool those differ on purpose:
+  // it holds itself to what the machine can render at once (see PoolWidth), so
+  // on a host with fewer cores than workers, dividing by the manifest figure
+  // would quote an ETA that no run on that host could ever meet. `averageMs` is
+  // measured under whatever width the run settled on, so the two agree.
+  //
+  // Pinned, they are the same number by definition, and the manifest figure is
+  // the honest one — quoting the core count there would understate a twenty-wide
+  // run by more than half.
+  const requested = Math.max(1, options.concurrency || 1);
+  const workers = Math.max(
+    1,
+    options.adaptiveConcurrency === false ? requested : startingPoolWidth(requested),
+  );
 
   return {
     total: rows.length,

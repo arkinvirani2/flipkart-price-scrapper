@@ -10,6 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/api';
 import { DEFAULT_JOB_OPTIONS, MAX_CONCURRENCY } from '@/types/dashboard';
 import type { ValidationReport as Report } from '@/lib/validation/uploadSchema';
@@ -28,12 +29,15 @@ export default function UploadPage() {
   // Fixed at creation, because it is stored on the manifest and a resumed run
   // reads it back from there — a batch scrapes with the pool it was made with.
   const [workers, setWorkers] = useState(DEFAULT_JOB_OPTIONS.concurrency);
+  // Off by default: the adaptive pool is the safer answer on an unknown host,
+  // and this is the switch that says "I know what this machine can take".
+  const [fixedWorkers, setFixedWorkers] = useState(false);
   const create = useMutation({
     mutationFn: () => api.createJob({
       name,
       accountName: account.trim(),
       rows: report?.rows ?? [],
-      options: { ...DEFAULT_JOB_OPTIONS, concurrency: workers },
+      options: { ...DEFAULT_JOB_OPTIONS, concurrency: workers, adaptiveConcurrency: !fixedWorkers },
     }),
     onSuccess: ({ job }) => router.push(`/jobs/${job.id}`),
   });
@@ -58,6 +62,23 @@ export default function UploadPage() {
         address, so if a batch comes back with an unusual number of failures, rerun the failed rows on
         a smaller pool before trusting the result.
       </p>
+
+      <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+        <div className="space-y-1">
+          <Label htmlFor="fixed-workers">Hold all {workers} workers open</Label>
+          <p className="text-xs text-muted-foreground">
+            {fixedWorkers
+              ? `All ${workers} workers scrape for the whole batch. Timeouts are widened to match, but a host that cannot render ${workers} pages at once will fail products rather than slow down — check the failure count on the first run.`
+              : `Off, the pool sizes itself: it opens at this machine's core count and widens only while that measurably helps, so a batch asking for ${workers} often runs 5-8 wide. Turn on to run exactly ${workers}.`}
+          </p>
+        </div>
+        <Switch
+          id="fixed-workers"
+          checked={fixedWorkers}
+          onCheckedChange={setFixedWorkers}
+          aria-label={`Hold all ${workers} workers open for the whole batch`}
+        />
+      </div>
       <Button className="w-full" onClick={() => create.mutate()} disabled={create.isPending}>{create.isPending ? <Loader2 className="animate-spin" /> : <Play />} Create batch</Button>
     </div>}
   </div>;

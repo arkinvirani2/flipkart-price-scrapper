@@ -220,6 +220,7 @@ export class JobRunner {
           blockBackoffMs: options.blockBackoffMs,
           blockRetries: options.blockRetries,
           concurrency: options.concurrency,
+          adaptiveConcurrency: options.adaptiveConcurrency,
           blockResources: options.blockResources,
           useNetworkCapture: options.useNetworkCapture,
           headless: !options.headed,

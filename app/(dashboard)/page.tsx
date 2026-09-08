@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
+import { ResetEverythingButton } from '@/components/dashboard/ResetEverythingButton';
 import { JobStateBadge } from '@/components/dashboard/StatusBadge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -57,11 +58,14 @@ export default function BatchesPage() {
             {data?.activeJobId ? ' — one running now' : ''}
           </p>
         </div>
-        <Button asChild>
-          <Link href="/upload">
-            <Upload /> New batch
-          </Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          <ResetEverythingButton activeJobId={data?.activeJobId ?? null} />
+          <Button asChild>
+            <Link href="/upload">
+              <Upload /> New batch
+            </Link>
+          </Button>
+        </div>
       </header>
 
       {interrupted.length > 0 && (

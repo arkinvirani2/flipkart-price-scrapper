@@ -146,6 +146,39 @@ function converge(
   assert.ok(settled >= MIN_POOL_WIDTH, `width fell to ${settled}, below the floor ${MIN_POOL_WIDTH}`);
 }
 
+/* ------------------------------------------------ pinned means pinned */
+{
+  // The whole point of the option: an operator asked for twenty, and twenty is
+  // what runs — on the simulated eight-core machine that the adaptive
+  // controller would have narrowed to roughly its knee.
+  const knee = 8;
+  const width = new PoolWidth(20, 20, false);
+
+  for (let round = 0; round < 40; round++) {
+    for (let i = 0; i < width.current(); i++) width.record(durationAt(20, knee));
+    assert.equal(width.current(), 20, `a pinned pool moved to ${width.current()} on round ${round}`);
+  }
+  assert.equal(width.isAdaptive(), false);
+
+  // And the comparison that justifies the flag existing: told the same story,
+  // the adaptive controller does move off twenty. If it did not, the two modes
+  // would be the same thing and this test would be proving nothing.
+  assert.ok(converge(20, 20, knee, 40) < 20, 'the adaptive controller should not sit at 20 here');
+}
+
+/* --------------------------------- pinning cannot be used to exceed the ceiling */
+{
+  // `start` is still clamped: a pinned pool is the ceiling, never more than it.
+  const width = new PoolWidth(8, 20, false);
+  assert.equal(width.current(), 8, `pinning overshot the ceiling to ${width.current()}`);
+}
+
+/* --------------------------- adaptive is the default, so nothing else changes */
+{
+  const width = new PoolWidth(20, 8);
+  assert.equal(width.isAdaptive(), true, 'PoolWidth stopped defaulting to adaptive');
+}
+
 /* ------------------------------------------- the ceiling is never overshot */
 {
   const width = new PoolWidth(5, 5);
@@ -212,6 +245,41 @@ async function gateTests(): Promise<void> {
     controller.abort();
 
     assert.equal(await waiting, false, 'aborting a run left a worker parked on the width gate');
+  }
+
+  // A pinned pool must hand every worker a slot at once and keep doing so for
+  // the whole batch. This is the actual failure the option exists to fix — "I
+  // asked for twenty and five were running" — so it is tested on the gate
+  // rather than inferred from the width number.
+  {
+    const width = new PoolWidth(20, 20, false);
+
+    for (let i = 0; i < 20; i++) {
+      assert.equal(await width.acquire(), true, `pinned pool refused a slot to worker ${i}`);
+    }
+
+    // The twenty-first must wait: pinned is a fixed width, not an unbounded one.
+    let overflowAdmitted = false;
+    const overflow = width.acquire().then((ok) => {
+      overflowAdmitted = ok;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(overflowAdmitted, false, 'a pinned pool admitted a 21st product at width 20');
+
+    width.release();
+    await overflow;
+    assert.equal(overflowAdmitted, true, 'a released slot was never handed on');
+
+    // Late in a batch, after hundreds of slow products have been reported, the
+    // width must still be 20 — a pinned pool that drifts is worse than one that
+    // never pinned, because the operator believes it did not. Slow enough that
+    // the adaptive controller would certainly have narrowed by now.
+    for (let i = 0; i < 400; i++) width.record(30_000);
+    assert.equal(width.current(), 20, `pinned width drifted to ${width.current()} mid-batch`);
+
+    // Freeing one slot must still admit one worker — and exactly one.
+    width.release();
+    assert.equal(await width.acquire(), true, 'a pinned pool stopped admitting workers mid-batch');
   }
 
   // Widening must wake the workers already waiting, not only new arrivals.

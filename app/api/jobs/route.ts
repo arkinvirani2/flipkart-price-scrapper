@@ -75,6 +75,11 @@ function sanitizeOptions(posted: Partial<JobOptions> | undefined): JobOptions {
   return {
     ...merged,
     concurrency: clamp(merged.concurrency, 1, MAX_CONCURRENCY, DEFAULT_JOB_OPTIONS.concurrency),
+    // Coerced rather than spread through, because this is the one boolean that
+    // switches off a safety valve: pinned, the clamp above is the *only* thing
+    // standing between a posted number and that many live browser contexts. A
+    // body carrying the string "false" must not read as "pin the pool".
+    adaptiveConcurrency: merged.adaptiveConcurrency !== false,
     delayMs: clamp(merged.delayMs, 0, 600_000, DEFAULT_JOB_OPTIONS.delayMs),
     delayJitterMs: clamp(merged.delayJitterMs, 0, 600_000, DEFAULT_JOB_OPTIONS.delayJitterMs),
     timeout: clamp(merged.timeout, 1_000, 600_000, DEFAULT_JOB_OPTIONS.timeout),

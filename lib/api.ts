@@ -20,6 +20,7 @@ import type { OrdersReport } from '@/lib/demand';
 // Type-only, so the server modules these live in are never pulled into the bundle.
 import type { AccountSummary } from '@/lib/store/jobStore';
 import type { RecommendationFile } from '@/lib/services/recommendations';
+import type { ResetReport } from '@/lib/services/systemReset';
 
 export class ApiError extends Error {
   constructor(
@@ -72,7 +73,7 @@ export type JobSummary = JobManifest & { stats: JobStats };
 
 // Re-exported so client components get these shapes from one place and never
 // reach into a server-only module themselves.
-export type { AccountSummary, RecommendationFile, OrdersReport };
+export type { AccountSummary, RecommendationFile, OrdersReport, ResetReport };
 
 export const api = {
   listJobs: () => request<{ jobs: JobSummary[]; activeJobId: string | null }>('/api/jobs'),
@@ -148,6 +149,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ indexes }),
     }),
+
+  /** Erase every batch, log, learned history and browser leftover. No undo. */
+  resetEverything: () => request<{ report: ResetReport }>('/api/reset', { method: 'POST' }),
 };
 
 export interface AnalyticsPayload {

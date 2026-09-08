@@ -45,6 +45,24 @@ const REPROBE_ROUNDS = 6;
  *
  * This changes only *when* a product starts. Results are still written to the
  * slot of their input index, so nothing here can reorder an output.
+ *
+ * ── Pinned mode ─────────────────────────────────────────────────────────────
+ * Constructed with `adaptive: false`, none of the above happens: the width is
+ * whatever it was started at and stays there for the whole batch. That is the
+ * "20 means 20" setting, and it exists because the hill-climb answers a
+ * question the operator may already know the answer to. The controller measures
+ * *this* machine as it is right now, so a host that is briefly busy — or one
+ * whose slowness is Flipkart's network rather than its own cores — is read as
+ * saturated, and the pool narrows and parks there for a batch that would have
+ * been fine at full width. Latency and throughput are still traded exactly as
+ * described above; pinning simply says the operator, not the measurement, is
+ * making that trade.
+ *
+ * The safety valve it gives up is real: an over-wide pinned pool stretches
+ * product wall-clock and can convert CPU starvation into scrape failures. What
+ * keeps that bounded is `pacedForWidth`, which is applied identically in both
+ * modes — a pinned pool of twenty scrapes with timeouts scaled 2.5x, so the
+ * products it stretches still have room to land.
  */
 export class PoolWidth {
   private limit: number;
@@ -57,12 +75,22 @@ export class PoolWidth {
   constructor(
     private readonly ceiling: number,
     start: number,
+    /**
+     * Whether to hill-climb at all. False pins the width at `start` for the
+     * life of the pool — see "Pinned mode" above.
+     */
+    private readonly adaptive = true,
   ) {
     this.limit = Math.max(1, Math.min(ceiling, start));
   }
 
   current(): number {
     return this.limit;
+  }
+
+  /** True when the width is being measured rather than held. For logging. */
+  isAdaptive(): boolean {
+    return this.adaptive;
   }
 
   /** Wait for a slot. Resolves false if the run was aborted while waiting. */
@@ -88,8 +116,13 @@ export class PoolWidth {
    * A round is `limit` products, so the median is taken over a sample the same
    * width as the pool — wide enough that one 40-click seller list does not move
    * it, narrow enough to react inside a batch rather than after it.
+   *
+   * A no-op when pinned. Callers still report every duration rather than
+   * checking the mode first, so the one place that knows whether a measurement
+   * means anything is the object that would act on it.
    */
   record(durationMs: number): void {
+    if (!this.adaptive) return;
     if (durationMs <= 0) return;
     this.samples.push(durationMs);
     if (this.samples.length < this.limit) return;

@@ -72,6 +72,12 @@ export interface JobOptions {
   blockRetries: number;
   /** Products scraped at once, each in its own browser context. 1 = sequential. */
   concurrency: number;
+  /**
+   * Let the pool narrow itself below `concurrency` when the machine looks
+   * saturated. On by default, which makes `concurrency` a ceiling; off pins the
+   * run at `concurrency` from the first product to the last. See PoolWidth.
+   */
+  adaptiveConcurrency: boolean;
   /** Drop images, media and fonts. Never blocks CSS — prices depend on it. */
   blockResources: boolean;
   useNetworkCapture: boolean;
@@ -93,6 +99,10 @@ export const DEFAULT_JOB_OPTIONS: JobOptions = {
   blockBackoffMs: 60_000,
   blockRetries: 3,
   concurrency: MAX_CONCURRENCY,
+  // Adaptive by default, so an existing batch behaves exactly as it did before
+  // this option existed — and so a host that genuinely cannot render twenty
+  // pages at once is still protected from the setting above it.
+  adaptiveConcurrency: true,
   blockResources: true,
   // Zero hits in 1010 recorded products; opt in only if Flipkart ships an API.
   useNetworkCapture: false,

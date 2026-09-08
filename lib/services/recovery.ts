@@ -79,3 +79,15 @@ export function ensureRecovered(): RecoveryReport {
   markRan();
   return recoverInterruptedJobs();
 }
+
+/**
+ * Arm recovery to run again.
+ *
+ * Only the full reset needs this. Recovery's once-per-process latch is correct
+ * for the lifetime of a server, but a reset ends one era of data and starts
+ * another; leaving the latch set would mean the first job of the new era could
+ * never be recognised as interrupted if the process died on it.
+ */
+export function resetRecoveryLatch(): void {
+  delete (globalThis as Record<string, unknown>).__recoveryDone;
+}

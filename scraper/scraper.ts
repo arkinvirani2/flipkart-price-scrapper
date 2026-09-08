@@ -152,10 +152,22 @@ export async function scrapeProducts(
   const workerCount = Math.max(1, Math.min(Math.trunc(resolved.concurrency) || 1, inputs.length));
   // The workers are the ceiling; the width is how many of them may be scraping
   // at any one moment. See PoolWidth for why those are different numbers.
-  const width = new PoolWidth(workerCount, startingPoolWidth(workerCount));
+  //
+  // Pinned, they are deliberately the same number: starting at the ceiling with
+  // the hill-climb switched off is what makes `concurrency` a target rather than
+  // a maximum, so every worker holds a slot for the whole batch and none of them
+  // ever waits on the gate.
+  const adaptive = resolved.adaptiveConcurrency;
+  const width = new PoolWidth(
+    workerCount,
+    adaptive ? startingPoolWidth(workerCount) : workerCount,
+    adaptive,
+  );
   if (workerCount > 1) {
     log.info(
-      `scraping with up to ${workerCount} concurrent workers, starting ${width.current()} wide`,
+      adaptive
+        ? `scraping with up to ${workerCount} concurrent workers, starting ${width.current()} wide`
+        : `scraping with a fixed pool of ${workerCount} concurrent workers (adaptive width off)`,
     );
   }
 
