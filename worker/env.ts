@@ -25,12 +25,28 @@ import type { ScraperOptions } from '@/scraper/types';
  */
 const DEFAULT_MAX_CONCURRENCY = 8;
 
+/**
+ * Requests per second the pool may make, across all its workers.
+ *
+ * Flipkart meters the seller endpoint per IP, and a runner is an Azure
+ * datacentre address, which is metered harder than a home connection: the same
+ * batch that ran clean for 200 products locally was refused after 70-80 there.
+ * The limiter adapts down from this on its own when a 429 arrives, so this is a
+ * starting rate rather than a promise — but starting low on a host known to be
+ * treated harshly is free, and starting high costs a stall.
+ *
+ * Change this line, or the WORKER_MAX_RPS variable in the workflow, not the code.
+ */
+const DEFAULT_MAX_RPS = 2.5;
+
 export interface WorkerEnv {
   supabaseUrl: string;
   serviceRoleKey: string;
   /** The specific batch to run, or null to take the oldest queued one. */
   jobId: string | null;
   maxConcurrency: number;
+  /** Pool-wide request ceiling. See DEFAULT_MAX_RPS. */
+  maxRequestsPerSecond: number;
   proxy: ScraperOptions['proxy'];
   /**
    * Who holds the lease. Identifies this run in the batch row, so a stale lease
@@ -63,6 +79,7 @@ export function readEnv(argv: string[] = process.argv.slice(2)): WorkerEnv {
     serviceRoleKey,
     jobId: readJobId(argv),
     maxConcurrency: readMaxConcurrency(),
+    maxRequestsPerSecond: readMaxRps(),
     proxy: readProxy(),
     owner: readOwner(),
   };
@@ -89,6 +106,14 @@ function readMaxConcurrency(): number {
   const raw = Number(process.env.WORKER_MAX_CONCURRENCY);
   if (!Number.isFinite(raw) || raw < 1) return DEFAULT_MAX_CONCURRENCY;
   return Math.min(Math.trunc(raw), 20);
+}
+
+function readMaxRps(): number {
+  const raw = Number(process.env.WORKER_MAX_RPS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_MAX_RPS;
+  // Capped: above Flipkart's own refill rate the limiter would just spend the
+  // batch discovering the ceiling by being refused at it.
+  return Math.min(raw, 8);
 }
 
 function readProxy(): ScraperOptions['proxy'] {

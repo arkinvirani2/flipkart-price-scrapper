@@ -311,6 +311,64 @@ seller is not on this listing" — rather than as a retryable failure, and it is
 payload whose shape had shifted under us would produce silently. Those products get the
 slow look; they are a minority, and they were always the expensive kind.
 
+### The pacing problem the speed-up created
+
+Making a product twenty times cheaper did not make the batch twenty times faster. It made
+it **collapse after about eighty products** — fast and clean up to there, then five minutes
+per product.
+
+Flipkart meters the seller endpoint per IP as a token bucket: a large opening allowance,
+then a refill of roughly four or five requests a second, and HTTP 429 for everything past
+it. Measured directly:
+
+| rate | result |
+| --- | --- |
+| 4 req/s | 150 requests over 38 s, all 200 |
+| 6 req/s | first 429 at request **225** (t+37 s) |
+| 10 req/s | first 429 at request **181** (t+18 s) |
+
+The burst allowance is what makes this so confusing to watch: at *any* rate the opening
+stretch is clean, and the wall only appears once the allowance is spent.
+
+The scraper walked into it because **`delayMs` is per worker.** It was calibrated when a
+product took ~40 s, so eight workers produced about 0.2 requests a second. A product now
+takes ~0.3 s, so the same eight workers and the same `delayMs` produce about **4.4** — a
+twenty-fold increase in request rate that no setting expressed and nobody chose.
+
+Then the 429 was handled in the worst possible way: it fell through to the rendered
+pipeline. So the reply to "you are making too many requests" was a PDP fetch, a `/sellers`
+navigation and two script bundles — and with `pacedForWidth` widening a 45 s navigation
+timeout to 84 s at a full pool, and `openProduct` retrying it three times, one refused
+product cost over four minutes to arrive at nothing.
+
+Three things fix it, in `rateLimiter.ts` and around it:
+
+- **One request budget for the whole pool**, expressed as a rate rather than as a gap
+  between one worker's products. `--rps` on the CLI, `WORKER_MAX_RPS` on the runner.
+- **It adapts.** A 429 halves the rate and parks every worker for a doubling cooldown; a
+  clean streak of 25 wins the rate back a step at a time. That is AIMD, and it matters
+  because a GitHub Actions runner is an Azure datacentre address, metered far harder than a
+  home connection — the run that survived 200 products locally was refused after 70-80
+  there. Neither host has to be told which it is.
+- **A 429 never becomes a fallback.** It says nothing about the product, so it is retried
+  cheaply against the API and, if it persists, raised as `BLOCKED` — the status that already
+  means "back off, all of you" and already has a pool-wide gate behind it.
+
+Belt and braces, `productBudgetMs` (90 s) caps one attempt at one product however its waits
+happen to compose. No individual timeout in the rendered pipeline is wrong; it is only their
+product that is, and this bounds it without unpicking any of them.
+
+Measured, 240 products through 8 workers:
+
+| | products/s | 429s survived | p95 per product |
+| --- | --- | --- | --- |
+| budget in force (3 req/s) | 3.03 | none hit | 5.0 s |
+| budget off (20 req/s) | 3.74 | absorbed; rate self-corrected to 3.25 | 7.3 s |
+
+Both finished all 240 with zero losses — the second only because the limiter pulled itself
+down to roughly where the first one already was. Configuring it too fast now costs a bumpy
+first minute instead of a dead batch.
+
 The older opportunistic response sniffer (`attachNetworkCapture`, `--network`) is still
 wired and still off by default. It watched for exactly this payload from inside a rendered
 page and resolved none of 13,150 products, because by then the page it was watching was the
@@ -436,8 +494,9 @@ goes red in `selectors.ts`.
 ## Large batches
 
 A product that the seller API answers costs one request — 100–700 ms, no browser page — so
-what paces a batch now is `--delay`, not the scraping. Products that fall through to the
-rendered pipeline still cost roughly 4 s each. Three things make a long run survivable
+what paces a batch now is the pool's request budget (`--rps`), not the scraping. At the
+default that is a thousand products in five to seven minutes. Products that fall through to
+the rendered pipeline still cost roughly 4 s each. Three things make a long run survivable
 either way:
 
 - **Every result is journalled as it completes**, to an NDJSON file next to `--out`
@@ -553,6 +612,7 @@ callers can branch on it.
 ```
 scraper/          the Playwright scraper — unchanged core, called by the CLI and the worker
   sellerApi.ts    the one request that answers a whole product, with no browser page
+  rateLimiter.ts  the pool's shared request budget, and how it adapts to a 429
   journal.ts      NDJSON journal + resume rule, used by the CLI
 worker/           the standalone worker: claim a batch, scrape it, write to Supabase, exit
   index.ts        entry point (npm run worker)

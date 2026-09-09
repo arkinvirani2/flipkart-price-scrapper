@@ -184,6 +184,55 @@ export interface ScraperOptions {
    */
   sellerApi?: boolean;
 
+  /**
+   * Ceiling on requests per second **for the whole pool**, not per worker.
+   *
+   * Flipkart meters the seller endpoint per IP: a large opening allowance, then
+   * a refill of roughly four or five a second, and HTTP 429 for everything over
+   * it. `delayMs` cannot express that, because it is a gap between one worker's
+   * products — eight workers at 1500ms produced 0.2 requests a second when a
+   * product took 40s and produce 4.4 now that one takes 0.3s, without a single
+   * setting changing. That twenty-fold jump is what makes a fast run collapse
+   * after the burst allowance is spent.
+   *
+   * This is a starting rate, not a fixed one: a 429 halves it and pauses the
+   * pool, and a long clean streak wins it back, so a run converges just under
+   * whatever its own IP is allowed. A datacentre address — a GitHub Actions
+   * runner, say — is metered far more tightly than a home connection, and
+   * neither has to be told which it is.
+   */
+  maxRequestsPerSecond?: number;
+
+  /**
+   * How many times one product re-asks the seller API after a 429 before it is
+   * handed to the pool-wide block back-off.
+   *
+   * Each retry costs one request and a cooldown the limiter has already
+   * imposed, so this is cheap; the alternative — rendering the page — costs a
+   * PDP, a seller-page navigation and two script bundles to learn the same
+   * thing.
+   */
+  sellerApiThrottleRetries?: number;
+
+  /**
+   * Hard ceiling on one attempt at one product, in ms. A backstop, not a knob.
+   *
+   * Every wait in the rendered pipeline is individually reasonable and they
+   * compose into something that is not: `openProduct` retries its navigation
+   * three times, `openSellerDrawer` twice, and `pacedForWidth` multiplies each
+   * of those timeouts by up to 2.5 when the pool is wide. A 45s navigation
+   * timeout becomes 84s, three of those is 252s, and the seller list has not
+   * been opened yet. That is how a product that is merely being refused
+   * everywhere turns into five minutes of wall-clock — and, because the pool
+   * width controller measures wall-clock, into a narrower pool as well.
+   *
+   * No individual timeout is wrong, so none of them is changed. This bounds the
+   * product instead: when the budget is spent the context is closed, which is
+   * the one lever that makes a parked Playwright call return, and the attempt is
+   * recorded as a failure it can be resumed from.
+   */
+  productBudgetMs?: number;
+
   /** Emit progress logs. */
   verbose?: boolean;
   /** Playwright storageState path, for a logged-in session if you need one. */

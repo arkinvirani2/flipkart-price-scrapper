@@ -160,6 +160,15 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   // One POST for the price, the buy box and the whole seller list, with no
   // browser page. See ScraperOptions.sellerApi.
   sellerApi: true,
+  // Pool-wide, not per worker. Measured: 4/s ran clean for 150 requests, 6/s
+  // was metered at 225 and 10/s at 181 — all from a home connection, and a
+  // datacentre address gets less. 3 is a deliberately conservative opening bid
+  // that the limiter then adapts down or up from. See ScraperOptions.
+  maxRequestsPerSecond: 3,
+  sellerApiThrottleRetries: 3,
+  // Backstop only. A healthy rendered product is ~4s; one that is being refused
+  // everywhere used to compose its way to five minutes. See ScraperOptions.
+  productBudgetMs: 90_000,
   // Three concurrent contexts. Measured against a 202-product batch without a
   // single block; raise it only with the same evidence in hand.
   concurrency: 3,

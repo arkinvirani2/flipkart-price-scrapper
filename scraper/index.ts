@@ -53,6 +53,7 @@ interface CliArgs {
   noHuman: boolean;
   noBuyboxProbe: boolean;
   noSellerApi: boolean;
+  rps?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -95,6 +96,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--no-human': args.noHuman = true; break;
       case '--no-buybox-probe': args.noBuyboxProbe = true; break;
       case '--no-seller-api': args.noSellerApi = true; break;
+      case '--rps': args.rps = Number(next()); break;
       case '--help':
       case '-h':
         printUsage();
@@ -152,6 +154,13 @@ Flipkart seller price comparison
                           reached for products the seller API could not answer.
 
   Batch pacing and recovery:
+    --rps <n>             Requests per second for the WHOLE pool, not per worker.
+                          Default 3. Flipkart meters its seller endpoint per IP:
+                          a large opening allowance, then a refill of about 4-5/s
+                          and HTTP 429 past it — which is why a fast run feels
+                          great for the first hundred products and then stalls.
+                          The scraper halves this on any 429 and wins it back on a
+                          clean streak, so it is a starting rate, not a promise.
     --delay <ms>          Pause between products. Default 0. Use ~1500 for 1000+ items.
     --jitter <ms>         Random extra pause, 0..n, on top of --delay. Default 400.
     --block-backoff <ms>  First pause after a captcha/rate-limit. Default 60000, doubling.
@@ -179,6 +188,7 @@ function toOptions(args: CliArgs): ScraperOptions {
     humanLikeBehavior: !args.noHuman,
     buyboxProbe: !args.noBuyboxProbe,
     sellerApi: !args.noSellerApi,
+    maxRequestsPerSecond: args.rps,
   };
 }
 

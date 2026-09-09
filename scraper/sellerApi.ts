@@ -38,9 +38,26 @@
  */
 
 import type { BrowserContext } from 'playwright';
+import type { RateLimiter } from './rateLimiter';
 import { SELLER_API_PATH, sellerApiHost } from './selectors';
 import type { ResolvedOptions, SellerCard } from './types';
 import { errorMessage, log } from './utils';
+
+/**
+ * What one call to the seller endpoint concluded.
+ *
+ * `throttled` exists so that "Flipkart is metering us" is never mistaken for
+ * "this product could not be read". They demand opposite responses: the second
+ * is a reason to go and render the page, the first is a reason to do LESS work,
+ * not more. Rendering a page in answer to a 429 spends a PDP, a /sellers
+ * navigation and two script bundles at the exact moment we have been told to
+ * slow down — and, with the pool's timeouts widened for load, costs minutes per
+ * product to arrive at nothing.
+ */
+export type SellerApiOutcome =
+  | { kind: 'read'; reading: SellerApiReading }
+  | { kind: 'throttled' }
+  | { kind: 'inconclusive' };
 
 /** A complete read of a product's seller list, taken without rendering it. */
 export interface SellerApiReading {
@@ -164,22 +181,36 @@ function apiUserAgent(userAgent: string): string {
 }
 
 /**
- * Ask Flipkart for a product's sellers directly. Returns null when the reply is
- * anything short of a complete read; never throws.
+ * Ask Flipkart for a product's sellers directly. Never throws.
  *
  * The request goes through the browser context, so it carries the same user
  * agent, locale and cookie jar as everything else the run does rather than
  * looking like a second, unrelated client.
+ *
+ * `limiter` holds the pool's request budget: a token is taken before every
+ * attempt, a 429 halves the rate and parks every worker, and a clean reply
+ * counts towards winning that rate back. Metering has to live outside this
+ * function because the quota is per IP, not per product — one worker's 429 is
+ * every worker's problem.
  */
 export async function fetchSellerListings(
   context: BrowserContext,
   pid: string,
   options: ResolvedOptions,
   userAgent: string,
-): Promise<SellerApiReading | null> {
+  limiter: RateLimiter,
+): Promise<SellerApiOutcome> {
   let host = sellerApiHost();
+  let throttles = 0;
 
-  for (let redirect = 0; redirect <= MAX_DC_REDIRECTS; redirect++) {
+  // Bounded by both counters at once: `redirect` follows datacentre corrections,
+  // `throttles` re-asks after a rate-limit cooldown. Neither can spin, and a
+  // product that keeps being metered gives up cheaply rather than falling
+  // through to a five-minute render.
+  for (let redirect = 0; redirect <= MAX_DC_REDIRECTS; ) {
+    if (!(await limiter.take(options.signal))) return { kind: 'inconclusive' };
+    if (options.signal?.aborted) return { kind: 'inconclusive' };
+
     let status: number;
     let text: string;
 
@@ -198,7 +229,7 @@ export async function fetchSellerListings(
       text = await response.text();
     } catch (error) {
       log.info(`seller API unavailable (${errorMessage(error)}); rendering the seller list instead.`);
-      return null;
+      return { kind: 'inconclusive' };
     }
 
     let body: unknown;
@@ -206,7 +237,20 @@ export async function fetchSellerListings(
       body = JSON.parse(text);
     } catch {
       log.info(`seller API returned HTTP ${status} with a non-JSON body; rendering the seller list instead.`);
-      return null;
+      return { kind: 'inconclusive' };
+    }
+
+    // Metered, not refused. This is the one status that must not become a
+    // fallback: it says nothing about the product and everything about how fast
+    // the pool is going, so the answer is to slow the pool down and ask again,
+    // not to spend a rendered page finding out the same thing more expensively.
+    if (status === 429 || at(body, 'ERROR_CODE') === 429) {
+      limiter.throttled();
+      if (++throttles > options.sellerApiThrottleRetries) {
+        log.warn(`still rate limited after ${throttles} attempt(s) — handing this product to the back-off.`);
+        return { kind: 'throttled' };
+      }
+      continue;
     }
 
     // Routing correction, not a refusal — the reply names the datacentre this
@@ -216,6 +260,7 @@ export async function fetchSellerListings(
       const next = typeof dc === 'string' || typeof dc === 'number' ? sellerApiHost(String(dc)) : null;
       if (next && next !== host && redirect < MAX_DC_REDIRECTS) {
         host = next;
+        redirect++;
         continue;
       }
     }
@@ -226,20 +271,22 @@ export async function fetchSellerListings(
       // than a real navigation, so a refusal here is at least as likely to be
       // about this request as about our IP. Calling it a block would park the
       // whole pool for a minute on that guess; the rendered path that follows is
-      // the one whose verdict can be trusted.
+      // the one whose verdict can be trusted. A 429 is the exception, handled
+      // above — that one says outright what it is.
       log.info(`seller API returned HTTP ${status}; rendering the seller list instead.`);
-      return null;
+      return { kind: 'inconclusive' };
     }
 
     const reading = readSellerApi(body);
+    limiter.succeeded();
     if (!reading) {
       log.info('seller API reply carried no usable seller list; rendering the seller list instead.');
-      return null;
+      return { kind: 'inconclusive' };
     }
 
     log.info(`${reading.sellers.length} seller(s) from the seller API — no page rendered`);
-    return reading;
+    return { kind: 'read', reading };
   }
 
-  return null;
+  return { kind: 'inconclusive' };
 }

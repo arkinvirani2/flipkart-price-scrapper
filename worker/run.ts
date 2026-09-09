@@ -65,7 +65,8 @@ export async function runBatch(
   }
 
   console.log(
-    `[worker] ${pending.length} product(s) to scrape of ${manifest.total}, ${concurrency} worker(s)` +
+    `[worker] ${pending.length} product(s) to scrape of ${manifest.total}, ${concurrency} worker(s), ` +
+      `up to ${env.maxRequestsPerSecond} req/s pool-wide` +
       (env.proxy ? ', through a proxy' : ''),
   );
 
@@ -96,6 +97,10 @@ export async function runBatch(
         blockBackoffMs: options.blockBackoffMs,
         blockRetries: options.blockRetries,
         concurrency,
+        // Pool-wide, and the setting that actually paces a batch now that a
+        // product is one request rather than three page loads. See
+        // WorkerEnv.maxRequestsPerSecond.
+        maxRequestsPerSecond: env.maxRequestsPerSecond,
         blockResources: options.blockResources,
         useNetworkCapture: options.useNetworkCapture,
         // `headed` is a local convenience for watching the browser work. There

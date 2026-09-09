@@ -21,6 +21,7 @@ import {
   type SellerListEntry,
 } from './productPage';
 import { PoolWidth, pacedForWidth } from './poolWidth';
+import { RateLimiter } from './rateLimiter';
 import { fetchSellerListings, type SellerApiReading } from './sellerApi';
 import { attachNetworkCapture, getSellerPrice, openSellerDrawer, type NetworkCapture } from './sellerDrawer';
 import { BLOCKED_HOSTS, BLOCKED_RESOURCE_TYPES, sellersUrlForPid } from './selectors';
@@ -54,6 +55,18 @@ const DEFAULT_USER_AGENT =
  */
 const WORKER_RAMP_MS = 750;
 
+/**
+ * The request budget for a run that has only one product in it.
+ *
+ * Metering exists to stop a pool of workers outrunning Flipkart's per-IP quota.
+ * A single product cannot, so it gets a limiter wide enough to be invisible —
+ * the plumbing stays uniform and `scrapeProduct` behaves exactly as it always
+ * has.
+ */
+function soloLimiter(options: ResolvedOptions): RateLimiter {
+  return new RateLimiter(Math.max(options.maxRequestsPerSecond, 10), 10);
+}
+
 /* ------------------------------------------------------------ single product */
 
 /**
@@ -71,7 +84,9 @@ export async function scrapeProduct(input: ScrapeInput, options: ScraperOptions 
     browser = await launchBrowser(resolved);
     const context = await createContext(browser, resolved);
     try {
-      return await scrapeInContext(context, input, resolved, 0);
+      // A one-product run has no pool to meter, but the limiter is not optional
+      // downstream — give it one whose budget it can never exhaust.
+      return await scrapeInContext(context, input, resolved, 0, soloLimiter(resolved));
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -150,6 +165,16 @@ export async function scrapeProducts(
   const slots: (ScrapeResult | null)[] = new Array(inputs.length).fill(null);
   const gate = new BlockGate();
 
+  // One request budget for the whole pool. The burst is a second's worth of
+  // headroom so a worker that has just been handed a product does not wait on a
+  // token that is already due — not the large opening allowance Flipkart itself
+  // grants, which is precisely the thing that lets a run feel fast for eighty
+  // products and then fall off a cliff.
+  const limiter = new RateLimiter(
+    Math.max(0.1, resolved.maxRequestsPerSecond),
+    Math.max(1, Math.ceil(resolved.maxRequestsPerSecond)),
+  );
+
   const workerCount = Math.max(1, Math.min(Math.trunc(resolved.concurrency) || 1, inputs.length));
   // The workers are the ceiling; the width is how many of them may be scraping
   // at any one moment. See PoolWidth for why those are different numbers.
@@ -216,6 +241,7 @@ export async function scrapeProducts(
           input,
           pacedForWidth(resolved, width.current()),
           gate,
+          limiter,
           workerId,
         );
       } finally {
@@ -314,10 +340,11 @@ async function scrapeWithBackoff(
   input: ScrapeInput,
   options: ResolvedOptions,
   gate: BlockGate,
+  limiter: RateLimiter,
   workerId: number,
 ): Promise<ScrapeResult> {
   let attempts = 1;
-  let result = await scrapeOnce(browser, input, options, attempts, workerId);
+  let result = await scrapeOnce(browser, input, options, limiter, attempts, workerId);
 
   for (let attempt = 1; attempt <= options.blockRetries && result.status === 'BLOCKED'; attempt++) {
     if (options.signal?.aborted) break;
@@ -329,7 +356,7 @@ async function scrapeWithBackoff(
     if (options.signal?.aborted) break;
 
     attempts++;
-    result = await scrapeOnce(browser, input, options, attempts, workerId);
+    result = await scrapeOnce(browser, input, options, limiter, attempts, workerId);
   }
 
   // One second look at a failure that reads as ours rather than the listing's.
@@ -338,7 +365,7 @@ async function scrapeWithBackoff(
   if (!options.signal?.aborted && TRANSIENT_STATUSES.includes(result.status)) {
     log.warn(`${result.status} — one retry in a fresh context before recording it.`);
     attempts++;
-    const retried = await scrapeOnce(browser, input, options, attempts, workerId);
+    const retried = await scrapeOnce(browser, input, options, limiter, attempts, workerId);
     // Take the retry's verdict either way: it is the more recent evidence, and
     // its screenshot and message describe the attempt that was actually kept.
     if (!options.signal?.aborted) result = retried;
@@ -352,6 +379,7 @@ async function scrapeOnce(
   browser: Browser,
   input: ScrapeInput,
   options: ResolvedOptions,
+  limiter: RateLimiter,
   attempt: number,
   workerId: number,
 ): Promise<ScrapeResult> {
@@ -365,14 +393,31 @@ async function scrapeOnce(
   };
   options.signal?.addEventListener('abort', abortContext, { once: true });
 
+  // The same lever, on a timer: no single attempt may outrun its budget however
+  // the waits inside it happen to compose. See ScraperOptions.productBudgetMs.
+  let overBudget = false;
+  const budget = setTimeout(() => {
+    overBudget = true;
+    log.warn(`over budget after ${Math.round(options.productBudgetMs / 1000)}s — abandoning this attempt.`);
+    abortContext();
+  }, options.productBudgetMs);
+
+  const gaveUp = (): string =>
+    `Gave up after ${Math.round(options.productBudgetMs / 1000)}s — the page never became readable.`;
+
   try {
     // `betweenProducts` only here, not in `scrapeProduct`: idle browsing and
     // pacing belong in the gap *between* products, and a single-product run has
     // no next product.
-    return await scrapeInContext(context, input, options, workerId, attempt, true);
+    const result = await scrapeInContext(context, input, options, workerId, limiter, attempt, true);
+    // Closing the context throws inside the pipeline, which catches it and
+    // reports whatever Playwright said about a closed target. Say what actually
+    // happened instead — the status is right, only the message is misleading.
+    return overBudget && result.status !== 'OK' ? { ...result, message: gaveUp() } : result;
   } catch (error) {
-    return failure(input, 'ERROR', errorMessage(error));
+    return failure(input, 'ERROR', overBudget ? gaveUp() : errorMessage(error));
   } finally {
+    clearTimeout(budget);
     options.signal?.removeEventListener('abort', abortContext);
     await context.close().catch(() => undefined);
   }
@@ -446,6 +491,7 @@ async function scrapeInContext(
   input: ScrapeInput,
   options: ResolvedOptions,
   workerId: number,
+  limiter: RateLimiter,
   attempt = 1,
   betweenProducts = false,
 ): Promise<ScrapeResult> {
@@ -479,11 +525,26 @@ async function scrapeInContext(
   step('opening');
   const api =
     options.sellerApi && input.fsn
-      ? await fetchSellerListings(context, input.fsn, options, options.userAgent ?? DEFAULT_USER_AGENT)
+      ? await fetchSellerListings(context, input.fsn, options, options.userAgent ?? DEFAULT_USER_AGENT, limiter)
       : null;
 
-  if (api) {
-    const resolved = resolveFromApi(input, api, startedAt, attempt);
+  // Being metered is a fact about our IP, not about this product, and the one
+  // answer it must never get is "then go and render the page" — that spends a
+  // PDP, a seller-page navigation and two script bundles at the exact moment we
+  // have been told to make fewer requests, and with the pool's timeouts widened
+  // for load it costs minutes to arrive at nothing. BLOCKED is the status that
+  // already means this: it parks the whole pool on the shared gate, waits, and
+  // retries the product cheaply.
+  if (api?.kind === 'throttled') {
+    return {
+      ...failure(input, 'BLOCKED', 'Flipkart rate limited the seller API (HTTP 429).'),
+      durationMs: Date.now() - startedAt,
+      attempts: attempt,
+    };
+  }
+
+  if (api?.kind === 'read') {
+    const resolved = resolveFromApi(input, api.reading, startedAt, attempt);
     if (resolved) {
       step('done');
       log.step('Done.');
