@@ -153,7 +153,13 @@ export const DEFAULT_OPTIONS: ResolvedOptions = {
   preferDirectSellerNavigation: true,
   // Read the buy box off the raw HTML before anything is rendered. Products the
   // account already wins end there, and the rest skip the PDP render.
+  //
+  // Second in line now: `sellerApi` answers the same question and more, from
+  // one request, so this only runs for products it could not read.
   buyboxProbe: true,
+  // One POST for the price, the buy box and the whole seller list, with no
+  // browser page. See ScraperOptions.sellerApi.
+  sellerApi: true,
   // Three concurrent contexts. Measured against a 202-product batch without a
   // single block; raise it only with the same evidence in hand.
   concurrency: 3,

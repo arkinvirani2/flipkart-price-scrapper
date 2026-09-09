@@ -264,23 +264,57 @@ the design:
 `selectors.ts` lists both sets; the extractor takes the first selector that matches
 anything, so compact selectors simply find nothing on a desktop page and vice versa.
 
-### Is there a seller API?
+### Is there a seller API? Yes — and it is the whole scrape
 
-The snapshots contain **no** server-rendered seller JSON — `window.__INITIAL_STATE__`
-appears only inside bootstrap script bodies, with no seller records — so a
-network-only approach cannot be assumed to work.
+There is, and finding it retired most of this file's cleverness.
 
-The scraper still attaches an opportunistic response sniffer
-(`attachNetworkCapture`) that watches JSON responses and deep-scans them for objects
-carrying a seller name *and* a price *and* a `sellerId`/`listingId`. If a payload yields
-the target seller, the entire click loop is skipped (`source: "network"`). Otherwise it
-falls back to DOM scraping (`source: "dom"`). **Off by default** — across 13,150 recorded
-products it resolved none of them, while buffering the JSON body of every response whose
-URL merely looked seller-ish. Opt in with `--network`.
+The `/sellers` page is a JavaScript shell. Its served HTML carries no seller markup at all;
+every card on it comes from **one POST the page makes on load**:
 
-If you can capture a HAR while the seller list loads, drop it in and the URL hints in
-`selectors.ts` (`SELLER_API_URL_HINTS`) can be narrowed to the real endpoint — that's the
-5–10× win, and the hook for it is already wired.
+```
+POST https://<n>.rome.api.flipkart.com/api/3/page/dynamic/product-sellers
+{"requestContext":{"productId":"<FSN>"},"locationContext":{}}
+```
+
+That single reply carries everything a product needs:
+
+| In the reply | What it is |
+| --- | --- |
+| `RESPONSE.pageContext.pricing.finalPrice.value` | the headline price — the same number the PDP's JSON-LD reports, on every product tested |
+| `RESPONSE.pageContext.listingId` | the listing the product page defaults to, so the row carrying it is the **buy-box holder**, stated rather than inferred from whose price happens to match |
+| `RESPONSE.data.product_seller_detail_1.data[]` | the **complete** seller list, with names, prices and struck-off MRPs |
+
+The third row is the one that matters most. It is not a page of the list: a 38-seller
+product returns all 38 in one reply. "Show More" on the rendered page is **client-side
+reveal of a list already downloaded** — so every click the scraper used to make, and every
+poll it made waiting for the next chunk to render, was time spent re-fetching nothing.
+
+So `sellerApi.ts` is now the first thing a product does, and for most products it is the
+only thing: **no browser page is opened at all.** No PDP, no `/sellers` navigation, no
+script bundle, no hydration wait, no card-count settle, no paging, no `getComputedStyle`.
+One request, 100–700 ms, and the product is finished.
+
+Two things are deliberately kept:
+
+- **`ERROR_MESSAGE: "DC Change"`.** Flipkart pins a session to one of its numbered API
+  datacentres and answers a call aimed at another with HTTP 406, naming the right one. That
+  is routing, not refusal, so it is followed once rather than treated as a failure. Without
+  this the call fails for any context that has already talked to `www.flipkart.com`.
+- **The whole rendered pipeline, untouched, behind it.** A reply that is anything short of
+  complete returns nothing, logs why, and the product renders exactly as it did before this
+  existed. `--no-seller-api` restores the old path in full, which changes speed and nothing
+  else.
+
+The one case that still renders on purpose is a product whose target seller is **not** in
+the reply. `SELLER_NOT_FOUND` is the only verdict that reads as *fact* downstream — "this
+seller is not on this listing" — rather than as a retryable failure, and it is what a
+payload whose shape had shifted under us would produce silently. Those products get the
+slow look; they are a minority, and they were always the expensive kind.
+
+The older opportunistic response sniffer (`attachNetworkCapture`, `--network`) is still
+wired and still off by default. It watched for exactly this payload from inside a rendered
+page and resolved none of 13,150 products, because by then the page it was watching was the
+expensive part. Asking for the payload directly is what it should have been doing.
 
 ## Design notes
 
@@ -308,7 +342,7 @@ value wins — ratings like "4.1" are excluded because the pattern requires ₹/
 **Wrong data is worse than no data.** When the price cannot be established confidently the
 scraper returns `MAIN_PRICE_NOT_FOUND` rather than a plausible-looking guess.
 
-**The buy box is asked first, and off the raw HTML.** See the next section — it is the
+**The buy box is asked first, and without a renderer.** See the next section — it is the
 largest single saving in a batch, and the one place where the fast answer and the slow
 answer are checked against each other in the regression suite.
 
@@ -319,11 +353,25 @@ being compared, the difference is zero, and the current bank settlement is the f
 settlement. Everything after that question — the seller list, the "Show more" paging, the
 price comparison — would only confirm a number already in hand.
 
-So the question is asked before anything is rendered. Flipkart server-renders both facts the
-answer needs — the `Fulfilled by <name>` line and a `<script type="application/ld+json">`
-blob carrying the price, FSN and availability — so `buyboxProbe.ts` fetches the product page
-as **HTML through the browser context** (same user agent, same cookie jar, no renderer) and
-reads them out of the markup.
+So the question is asked before anything is rendered — and since the seller API landed, it
+is asked **by that one call**, which names the buy-box listing outright in
+`pageContext.listingId`. Everything below describes `buyboxProbe.ts`, which now runs only
+for the products the API could not answer.
+
+> **Heads up if you are reading this to repair something:** Flipkart has since dropped the
+> `Fulfilled by <name>` line from the PDP entirely — served markup and rendered DOM both.
+> The line the page shows now is a bare `Seller` label with the name in a sibling node. So
+> `buyboxProbe` currently returns null for *every* product and `getFulfilledBy` returns null
+> on the rendered page, which is what made every product take the full slow route and what
+> stopped "the account already holds the main listing" from ever being reported. The seller
+> API answers both questions properly, so this is no longer on the hot path — but the
+> fallback is still reading for copy that is gone, and `FULFILLED_BY_PATTERN_SOURCE` in
+> `selectors.ts` is where to fix it if the fallback ever needs to stand on its own again.
+
+Flipkart used to server-render both facts the answer needs — the `Fulfilled by <name>` line
+and a `<script type="application/ld+json">` blob carrying the price, FSN and availability —
+so `buyboxProbe.ts` fetches the product page as **HTML through the browser context** (same
+user agent, same cookie jar, no renderer) and reads them out of the markup.
 
 Two things follow from the answer:
 
@@ -363,10 +411,12 @@ list.
 npm run verify
 ```
 
-35 assertions replayed against the three checked-in snapshots — parsing, both price paths,
+57 assertions replayed against the four checked-in snapshots — parsing, both price paths,
 all 10 compact sellers and all 5 desktop sellers with exact prices, the "show more"
-disambiguation, the bank-offer price trap, the stripped-class resilience path, and the
-comparison math.
+disambiguation, the bank-offer price trap, the stripped-class resilience path, the
+comparison math, and — against a real captured `product-sellers-api.json` — the seller-API
+reader: its headline price, its buy-box row, its complete 10-seller list with prices and
+MRPs, and the five ways an incomplete reply must return null rather than guess.
 
 Two things the harness does deliberately, both learned the hard way:
 
@@ -385,7 +435,10 @@ goes red in `selectors.ts`.
 
 ## Large batches
 
-At roughly 4 s/product, 1000 items is a 1–3 hour run. Three things make that survivable:
+A product that the seller API answers costs one request — 100–700 ms, no browser page — so
+what paces a batch now is `--delay`, not the scraping. Products that fall through to the
+rendered pipeline still cost roughly 4 s each. Three things make a long run survivable
+either way:
 
 - **Every result is journalled as it completes**, to an NDJSON file next to `--out`
   (`results.json` → `results.ndjson`, override with `--journal`). A crash at item 900
@@ -499,6 +552,7 @@ callers can branch on it.
 
 ```
 scraper/          the Playwright scraper — unchanged core, called by the CLI and the worker
+  sellerApi.ts    the one request that answers a whole product, with no browser page
   journal.ts      NDJSON journal + resume rule, used by the CLI
 worker/           the standalone worker: claim a batch, scrape it, write to Supabase, exit
   index.ts        entry point (npm run worker)

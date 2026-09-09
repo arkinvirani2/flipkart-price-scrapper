@@ -28,7 +28,8 @@ time, checking each succeeds before the next:
 | `0002_views.sql` | `job_rows_v` (the input/result join the UI renders), `job_stats_v` (the counts), and `job_analytics()`. |
 | `0003_rls.sql` | Row level security, the grants, and adding `jobs` + `job_results` to the Realtime publication. |
 | `0004_claim.sql` | `claim_job()`, `heartbeat_job()`, `release_job()`, `reap_stale_jobs()` — the lease. |
-| `0005_retention.sql` | **Apply last, and only once the rest works.** The 30-batches-per-account prune. It is the only migration that deletes anything. |
+| `0005_retention.sql` | The 30-batches-per-account prune. It is the only migration that deletes anything — apply it only once the rest works. |
+| `0006_source_api.sql` | Widens the `job_results.source` check to allow `'api'`. **Apply before running a worker built after the seller-API change**, or every result it produces is rejected by the constraint and lost. |
 
 `0005` no longer schedules anything: the nightly pg_cron entry is commented out and the file
 unschedules an existing `prune-jobs` entry if a previous version installed one. Run

@@ -221,6 +221,26 @@ export function sellersUrlForPid(pid: string): string {
   return `https://www.flipkart.com/sellers?pid=${encodeURIComponent(pid)}`;
 }
 
+/**
+ * The endpoint the /sellers page itself calls to populate every card on it.
+ *
+ * Kept here with the other Flipkart addresses rather than beside its parser, on
+ * the same principle as the rest of this file: when Flipkart moves something,
+ * there should be one place to edit. See scraper/sellerApi.ts for what the reply
+ * contains and why it replaces the rendered seller list entirely.
+ */
+export const SELLER_API_PATH = '/api/3/page/dynamic/product-sellers';
+
+/**
+ * Flipkart's API hosts are numbered per datacentre — 1.rome…, 2.rome… — and a
+ * session pinned to one rejects a call aimed at another with a "DC Change"
+ * reply naming the right number. `1` is the opening guess; the caller follows
+ * the correction when it comes.
+ */
+export function sellerApiHost(dc: string = '1'): string {
+  return `${encodeURIComponent(dc)}.rome.api.flipkart.com`;
+}
+
 /** Join a selector list into one CSS query. */
 export function anyOf(list: readonly string[]): string {
   return list.join(', ');

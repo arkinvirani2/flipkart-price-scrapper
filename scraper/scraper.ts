@@ -9,7 +9,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { probeBuybox } from './buyboxProbe';
 import { humanBehavior } from './humanBehavior';
-import { comparePrice, pickBuyboxSeller, sellerNamesMatch } from './parser';
+import { comparePrice, findSeller, pickBuyboxSeller, sellerNamesMatch } from './parser';
 import {
   checkAvailability,
   findSellerListEntry,
@@ -21,6 +21,7 @@ import {
   type SellerListEntry,
 } from './productPage';
 import { PoolWidth, pacedForWidth } from './poolWidth';
+import { fetchSellerListings, type SellerApiReading } from './sellerApi';
 import { attachNetworkCapture, getSellerPrice, openSellerDrawer, type NetworkCapture } from './sellerDrawer';
 import { BLOCKED_HOSTS, BLOCKED_RESOURCE_TYPES, sellersUrlForPid } from './selectors';
 import type {
@@ -457,25 +458,54 @@ async function scrapeInContext(
     }
   };
 
-  // 0. The buy box, first and off the raw HTML — no page, no renderer.
+  // The gap this product hands over to the next one. Pulled out because three
+  // paths now finish without ever opening a page, and a page-less product has
+  // nothing to browse idly on — but the politeness throttle still applies,
+  // because the next product is a request either way.
+  const handOver = async (): Promise<void> => {
+    if (betweenProducts) await jitteredDelay(options.delayMs, options.delayJitterMs, options.signal);
+  };
+
+  // 0. The whole comparison from one request, off the endpoint the /sellers
+  //    page itself calls — no page, no PDP, no renderer.
   //
-  // This is the question that decides how much of the rest is worth doing. If
-  // the account already holds the buy box, its price IS the page price, the
-  // bank settlement does not move, and the seller list has nothing to add — so
-  // that product is finished here, having never opened a browser page at all.
+  // That one reply carries the headline price, the listing the page defaults to
+  // and the COMPLETE seller list, so a product that it answers is finished here
+  // in a few hundred milliseconds. See scraper/sellerApi.ts for what it returns
+  // and why the rendered seller list could never beat it.
   //
-  // A null probe means "not conclusive", not "not ours": the full rendered
-  // pipeline below then runs exactly as it did before the probe existed.
+  // Null means "not conclusive", not "not ours": everything below then runs
+  // exactly as it did before this call existed.
   step('opening');
+  const api =
+    options.sellerApi && input.fsn
+      ? await fetchSellerListings(context, input.fsn, options, options.userAgent ?? DEFAULT_USER_AGENT)
+      : null;
+
+  if (api) {
+    const resolved = resolveFromApi(input, api, startedAt, attempt);
+    if (resolved) {
+      step('done');
+      log.step('Done.');
+      await handOver();
+      return resolved;
+    }
+  }
+
+  // 1. The buy box, off the raw HTML — no page, no renderer.
+  //
+  // Second in line now: the seller API answers the same question and more. This
+  // still runs for the products it could not read, where it decides how much of
+  // the rest is worth doing. If the account already holds the buy box, its price
+  // IS the page price, the bank settlement does not move, and the seller list
+  // has nothing to add — so that product is finished here too.
   const probe = options.buyboxProbe ? await probeBuybox(context, input.productUrl, options) : null;
   if (probe) log.info(`fulfilled by: ${probe.buyboxSeller} (from page HTML)`);
 
   if (probe && sellerNamesMatch(probe.buyboxSeller, input.targetSeller)) {
     log.step('Buy box is already ours — no seller comparison needed.');
     step('done');
-    // No page was opened, so there is nothing to browse idly on; the politeness
-    // throttle still applies, because the next product is a request either way.
-    if (betweenProducts) await jitteredDelay(options.delayMs, options.delayJitterMs, options.signal);
+    await handOver();
     return {
       fsn: input.fsn,
       sku: input.sku,
@@ -650,6 +680,77 @@ async function scrapeInContext(
 
     await page.close().catch(() => undefined);
   }
+}
+
+/**
+ * Turn one seller-API reading into a finished product, or null to hand it to
+ * the rendered pipeline.
+ *
+ * Two of the three outcomes are answered here outright:
+ *
+ *   - the buy box is the account's own listing, so its price IS the page price
+ *     and there is nothing to compare;
+ *   - the account is in the list at a readable price, so compare and be done.
+ *
+ * The third — the target seller is not in the list — deliberately returns null
+ * and renders the page. The reply is provably complete (a 38-seller product
+ * comes back with all 38, and "Show More" is client-side reveal of a list
+ * already downloaded), so the rendered path will almost always agree. But
+ * SELLER_NOT_FOUND is the one verdict that reads as *fact* in the
+ * recommendations — "this seller is not on this listing" — rather than as a
+ * retryable failure, and it is the verdict a payload whose shape had shifted
+ * under us would produce silently. So the products that would carry it are the
+ * ones that still get looked at the slow way. They are a minority of a batch,
+ * and the cost of the second look is one extra request on a product that was
+ * always going to be the expensive kind.
+ */
+function resolveFromApi(
+  input: ScrapeInput,
+  api: SellerApiReading,
+  startedAt: number,
+  attempt: number,
+): ScrapeResult | null {
+  const tail = {
+    fsn: input.fsn,
+    sku: input.sku,
+    productUrl: input.productUrl,
+    mainPrice: api.mainPrice,
+    buyboxSellerName: api.buyboxSeller,
+    status: 'OK' as const,
+    sellersScanned: api.sellers.length,
+    showMoreClicks: 0,
+    source: 'api' as const,
+    durationMs: Date.now() - startedAt,
+    attempts: attempt,
+  };
+
+  if (sellerNamesMatch(api.buyboxSeller, input.targetSeller)) {
+    log.step('Buy box is already ours — no seller comparison needed.');
+    return {
+      ...tail,
+      sellerName: api.buyboxSeller,
+      mainListingIsAccountSeller: true,
+      sellerPrice: api.mainPrice,
+      difference: null,
+      isPriceDifferent: false,
+    };
+  }
+
+  const seller = findSeller(api.sellers, input.targetSeller);
+  // A named seller with no price is a reply we do not understand well enough to
+  // record; the rendered path reads that card for itself.
+  if (!seller || seller.price === null) return null;
+
+  log.step('Seller found...');
+  const { difference, isPriceDifferent } = comparePrice(api.mainPrice, seller.price);
+  return {
+    ...tail,
+    sellerName: seller.name,
+    mainListingIsAccountSeller: false,
+    sellerPrice: seller.price,
+    difference,
+    isPriceDifferent,
+  };
 }
 
 /**

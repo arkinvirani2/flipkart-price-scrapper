@@ -27,12 +27,15 @@ import {
 import { extractSellers, findSellerByNameAnchored, showMoreButton } from './sellerDrawer';
 import { comparePrice, findSeller, parsePrice, pickBuyboxSeller } from './parser';
 import { readBuyboxHtml } from './buyboxProbe';
+import { readSellerApi } from './sellerApi';
 import { resolveOptions, setVerbose } from './utils';
 
 const ROOT = join(__dirname, '..');
 const PDP = join(ROOT, 'product-detailpage.html');
 const SELLERS = join(ROOT, 'after-click-see-more-seller.html');
 const SELLERS_DESKTOP = join(ROOT, 'all-sellers.html');
+/** A real reply from the endpoint the /sellers page calls, pid=STIH9DCHWXFCYWNN. */
+const SELLER_API = join(ROOT, 'product-sellers-api.json');
 
 const options = resolveOptions({ timeout: 3_000 });
 
@@ -50,7 +53,7 @@ function check(label: string, actual: unknown, expected: unknown): void {
 async function main(): Promise<void> {
   setVerbose(false);
 
-  for (const file of [PDP, SELLERS, SELLERS_DESKTOP]) {
+  for (const file of [PDP, SELLERS, SELLERS_DESKTOP, SELLER_API]) {
     if (!existsSync(file)) {
       console.error(`Missing snapshot: ${file}`);
       process.exit(2);
@@ -177,6 +180,83 @@ async function main(): Promise<void> {
     check('structured extraction degrades to empty', (await extractSellers(page)).length, 0);
     check('text anchor still finds MALBEC', (await findSellerByNameAnchored(page, 'MALBEC'))?.price, 135);
     check('text anchor ignores the 4.1 rating', (await findSellerByNameAnchored(page, 'TAPEMAN'))?.price, 130);
+
+    console.log('\nseller API payload (product-sellers-api.json)');
+    const api = readSellerApi(JSON.parse(readFileSync(SELLER_API, 'utf8')));
+    check('headline price', api?.mainPrice, 130);
+    check('buy-box listing names its seller', api?.buyboxSeller, 'vedant9110');
+    check('complete seller list in one reply', api?.sellers.length, 10);
+    check(
+      'seller names',
+      api?.sellers.map((s) => s.name),
+      [
+        'vedant9110',
+        'AARADHYA SELLS',
+        'Previx',
+        'VARSOENTERPRISE',
+        'Shrivyaa',
+        'VIREXA',
+        'BhavaniTraders14',
+        'Anuttar',
+        'JAYGOPALENTERPRISEE',
+        'MobiXO',
+      ],
+    );
+    check(
+      'prices',
+      api?.sellers.map((s) => s.price),
+      [130, 129, 130, 130, 143, 140, 146, 143, 159, 228],
+    );
+    check('MRP is read from the struck-off entry', api?.sellers[0].mrp, 559);
+    check('findSeller works on API cards', findSeller(api?.sellers ?? [], 'previx')?.price, 130);
+
+    console.log('\nseller API: incomplete replies are refused, never guessed');
+    check('no RESPONSE', readSellerApi({}), null);
+    check('no price', readSellerApi({ RESPONSE: { data: { product_seller_detail_1: { data: [] } } } }), null);
+    check(
+      'price but no sellers',
+      readSellerApi({
+        RESPONSE: {
+          pageContext: { pricing: { finalPrice: { value: 99 } } },
+          data: { product_seller_detail_1: { data: [] } },
+        },
+      }),
+      null,
+    );
+    check(
+      'buy box falls back to the selected row when no listing id matches',
+      readSellerApi({
+        RESPONSE: {
+          pageContext: { pricing: { finalPrice: { value: 99 } }, listingId: 'LSTNOTHERE' },
+          data: {
+            product_seller_detail_1: {
+              data: [
+                { value: { listingId: 'LST1', sellerInfo: { value: { name: 'First' } }, pricing: { value: { finalPrice: { value: 99 } } } } },
+                { value: { listingId: 'LST2', selected: true, sellerInfo: { value: { name: 'Second' } }, pricing: { value: { finalPrice: { value: 120 } } } } },
+              ],
+            },
+          },
+        },
+      })?.buyboxSeller,
+      'Second',
+    );
+    check(
+      'a nameless row is a skeleton, not a seller',
+      readSellerApi({
+        RESPONSE: {
+          pageContext: { pricing: { finalPrice: { value: 99 } }, listingId: 'LST1' },
+          data: {
+            product_seller_detail_1: {
+              data: [
+                { value: { listingId: 'LST1', sellerInfo: { value: { name: 'Real' } }, pricing: { value: { finalPrice: { value: 99 } } } } },
+                { value: { listingId: 'LST2', sellerInfo: { value: { name: '  ' } }, pricing: { value: { finalPrice: { value: 120 } } } } },
+              ],
+            },
+          },
+        },
+      })?.sellers.length,
+      1,
+    );
 
     console.log('\ncomparison');
     check('236 vs 135', comparePrice(236, 135), { difference: -101, isPriceDifferent: true });

@@ -67,7 +67,7 @@ export interface ScrapeResult {
   sellersScanned?: number;
   showMoreClicks?: number;
   /** Where the seller list came from. */
-  source?: 'network' | 'dom';
+  source?: 'network' | 'dom' | 'api';
   durationMs?: number;
   /** How many times this product was attempted, including back-off retries. 1 when it worked first go. */
   attempts?: number;
@@ -165,6 +165,25 @@ export interface ScraperOptions {
    * nothing else.
    */
   buyboxProbe?: boolean;
+
+  /**
+   * Read the seller list from the endpoint the /sellers page itself calls,
+   * instead of rendering that page and scraping its cards.
+   *
+   * On by default, and by a wide margin the largest saving in the scraper. One
+   * POST returns the headline price, the buy-box listing and the COMPLETE
+   * seller list — so a product needs no browser page at all: no PDP, no
+   * /sellers navigation, no hydration wait, no card-count settle, no "Show
+   * More" paging. Measured against the rendered path it agrees on every price
+   * and every seller, and returns in a few hundred milliseconds rather than
+   * tens of seconds.
+   *
+   * A reply that is anything short of complete returns nothing and the product
+   * is rendered exactly as it was before, so turning this off changes speed and
+   * nothing else. See scraper/sellerApi.ts.
+   */
+  sellerApi?: boolean;
+
   /** Emit progress logs. */
   verbose?: boolean;
   /** Playwright storageState path, for a logged-in session if you need one. */

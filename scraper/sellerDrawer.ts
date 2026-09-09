@@ -468,6 +468,25 @@ export async function clickShowMoreUntilSellerFound(
   let sellers = await extractSellers(page);
   let lastCount = sellers.length;
 
+  /**
+   * Text-anchored lookup, for when the card classes have rotated and structured
+   * extraction silently under-reports while the name is plainly on the page.
+   *
+   * It walks every `div, span, p, a, li` in the document, which on a seller page
+   * is tens of thousands of nodes, so it is asked only when its answer could
+   * differ from the structural one: when extraction found no cards at all, and
+   * once more before "not found" is recorded. Running it on every pass — which
+   * is what it used to do — paid that sweep per "Show More" click to re-confirm
+   * a list the structural reader was reading perfectly well.
+   */
+  const anchoredMatch = async (): Promise<SellerCard | null> => {
+    const anchored = await findSellerByNameAnchored(page, targetSeller);
+    if (!anchored || !sellerNamesMatch(anchored.name, targetSeller)) return null;
+    log.step('Seller found...');
+    log.warn('matched via text anchor — card selectors may need updating');
+    return anchored;
+  };
+
   for (;;) {
     const structuralMatch = findSeller(sellers, targetSeller);
     if (structuralMatch) {
@@ -475,13 +494,9 @@ export async function clickShowMoreUntilSellerFound(
       return { seller: structuralMatch, sellers, sellersScanned: sellers.length, showMoreClicks };
     }
 
-    // Catches the case where the card classes changed and structured extraction
-    // silently under-reports, but the name is plainly on the page.
-    const anchored = await findSellerByNameAnchored(page, targetSeller);
-    if (anchored && sellerNamesMatch(anchored.name, targetSeller)) {
-      log.step('Seller found...');
-      log.warn('matched via text anchor — card selectors may need updating');
-      return { seller: anchored, sellers, sellersScanned: Math.max(sellers.length, 1), showMoreClicks };
+    if (sellers.length === 0) {
+      const anchored = await anchoredMatch();
+      if (anchored) return { seller: anchored, sellers, sellersScanned: 1, showMoreClicks };
     }
 
     log.step(`Seller not found... (${sellers.length} sellers scanned)`);
@@ -496,6 +511,12 @@ export async function clickShowMoreUntilSellerFound(
         sellers = await extractSellers(page);
         lastCount = sellers.length;
         continue;
+      }
+
+      // The last word before a "not found" is written down.
+      const anchored = await anchoredMatch();
+      if (anchored) {
+        return { seller: anchored, sellers, sellersScanned: Math.max(sellers.length, 1), showMoreClicks };
       }
 
       log.info('no "Show More" control remains — seller list is exhausted');
@@ -519,13 +540,16 @@ export async function clickShowMoreUntilSellerFound(
     showMoreClicks++;
 
     // Wait on the list actually growing — this is the lazy-load / spinner wait.
-    const grown = await waitFor(
-      async () => {
-        const current = await extractSellers(page);
-        return current.length > lastCount ? current : null;
-      },
-      { timeoutMs: options.timeout, description: 'additional sellers' },
-    );
+    //
+    // Counted, not extracted: the poll only ever needed the length, and running
+    // the full extraction every 150ms meant two `getComputedStyle` calls per
+    // card per poll, on every worker at once. Style resolution is the most
+    // expensive thing a page can be asked for, and paying for it here starved
+    // the very renderer we were waiting on. Same rule as the settling loop above.
+    const grown = await waitFor(async () => (await countSellerCards(page)) > lastCount, {
+      timeoutMs: options.timeout,
+      description: 'additional sellers',
+    });
 
     if (!grown) {
       log.info('no new sellers rendered after "Show More" — treating the list as complete');
@@ -534,8 +558,8 @@ export async function clickShowMoreUntilSellerFound(
       return { seller: lateMatch, sellers: finalSellers, sellersScanned: finalSellers.length, showMoreClicks };
     }
 
-    sellers = grown;
-    lastCount = grown.length;
+    sellers = await extractSellers(page);
+    lastCount = sellers.length;
   }
 }
 
