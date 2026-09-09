@@ -30,9 +30,10 @@ time, checking each succeeds before the next:
 | `0004_claim.sql` | `claim_job()`, `heartbeat_job()`, `release_job()`, `reap_stale_jobs()` — the lease. |
 | `0005_retention.sql` | **Apply last, and only once the rest works.** The 30-batches-per-account prune. It is the only migration that deletes anything. |
 
-If `0005` prints a notice about pg_cron not being available, enable it under **Database →
-Extensions** and re-run that file — or just run `select public.prune_jobs(30);` by hand now
-and then. Retention is tidy-up, not a correctness rule.
+`0005` no longer schedules anything: the nightly pg_cron entry is commented out and the file
+unschedules an existing `prune-jobs` entry if a previous version installed one. Run
+`select public.prune_jobs(30);` from the SQL editor when the job list gets long. Retention is
+tidy-up, not a correctness rule.
 
 ### Collect the keys
 
@@ -104,9 +105,9 @@ have become UTC and shifted every bar.
 
 ### The dispatch token, so Start works from the dashboard
 
-Without this the dashboard still queues batches — they just wait for the next scheduled run
-instead of starting within a minute. The response says which happened, so you will not be
-left guessing.
+Without this the dashboard still queues batches — but nothing picks them up on its own now
+that the schedule is off, so you would have to start the workflow from the Actions tab. The
+response says which happened, so you will not be left guessing.
 
 1. <https://github.com/settings/personal-access-tokens/new> → **Fine-grained token**.
 2. **Repository access**: only this repository.
@@ -117,19 +118,22 @@ left guessing.
 It is used from one server-side module (`lib/services/githubDispatch.ts`) and never reaches
 the browser.
 
-### The schedule
+### The schedule (off)
 
-`.github/workflows/scraper.yml` runs at `30 3,15 * * *` UTC — 09:00 and 21:00 IST. India has
-no daylight saving, so those do not drift.
+There is no automatic run. The `schedule:` trigger in `.github/workflows/scraper.yml` is
+commented out — batches only start when the dashboard's Start button dispatches the
+workflow, or when you run it yourself from the Actions tab.
 
-Two things about GitHub's scheduler that are worth knowing rather than discovering:
+To put it back, uncomment the block at the top of that file. It was `30 3,15 * * *` UTC —
+09:00 and 21:00 IST, and India has no daylight saving, so those do not drift. Two things
+about GitHub's scheduler that are worth knowing before you re-enable it:
 
 - It is best-effort and routinely runs **5–20 minutes late** under load.
 - A scheduled workflow in a public repository is **disabled automatically after 60 days**
   with no repository activity. If batches quietly stop running, check this first.
 
-A scheduled run does not invent work: it takes the oldest **queued** batch, and exits 0 with
-"nothing to do" if there is none. An idle day is a green tick.
+Either way a run does not invent work: it takes the oldest **queued** batch, and exits 0
+with "nothing to do" if there is none. An empty run is a green tick.
 
 ### Running it by hand
 
@@ -214,7 +218,7 @@ the two cannot collide — whoever claims first gets the batch.
   are in the Actions run's console output, and per-product `status` and `message` are in the
   database.
 - **Free-tier limits.** Supabase free tier pauses a project after a week with no activity,
-  which would stop the scheduled runs from finding a database. Two batches a day is plenty
-  of activity, but a long quiet period is not.
+  which would stop a run from finding a database. With the schedule off, nothing keeps the
+  project warm on its own — a long quiet period will pause it.
 - **Existing local data was not migrated.** The 40 batches under `data/` are untouched and
   are not visible in the deployed dashboard. Supabase starts empty.

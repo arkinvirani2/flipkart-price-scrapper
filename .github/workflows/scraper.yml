@@ -3,8 +3,8 @@ name: Scraper
 # The scraper's runtime. It used to be a Node process on a desk; it is this now,
 # which is why nothing needs to stay awake for a batch to run.
 #
-# Three ways in:
-#   schedule            twice a day, drains whatever is queued
+# Two ways in, now that the schedule is off:
+#   schedule            DISABLED — see the commented-out block below
 #   repository_dispatch fired by the dashboard's Start button, via a PAT held in
 #                       Vercel's server environment (see lib/services/githubDispatch.ts)
 #   workflow_dispatch   by hand, from the Actions tab, for testing
@@ -13,16 +13,20 @@ name: Scraper
 # and exits 0.
 
 on:
-  schedule:
-    # UTC only; GitHub has no timezone setting. 03:30 and 15:30 UTC are 09:00
-    # and 21:00 IST, and India has no daylight saving, so these do not drift.
-    #
-    # Two things worth knowing rather than discovering: GitHub's scheduler is
-    # best-effort and routinely runs 5-20 minutes late under load, and a
-    # scheduled workflow in a public repository is disabled automatically after
-    # 60 days with no repository activity. If batches quietly stop running,
-    # check that second one first.
-    - cron: '30 3,15 * * *'
+  # DISABLED: the twice-daily schedule is turned off on purpose — batches are
+  # run by hand now, from the dashboard's Start button (repository_dispatch)
+  # or from the Actions tab (workflow_dispatch). Uncomment the block below to
+  # bring the automatic runs back; nothing else needs to change.
+#   schedule:
+#     # UTC only; GitHub has no timezone setting. 03:30 and 15:30 UTC are 09:00
+#     # and 21:00 IST, and India has no daylight saving, so these do not drift.
+#     #
+#     # Two things worth knowing rather than discovering: GitHub's scheduler is
+#     # best-effort and routinely runs 5-20 minutes late under load, and a
+#     # scheduled workflow in a public repository is disabled automatically after
+#     # 60 days with no repository activity. If batches quietly stop running,
+#     # check that second one first.
+#     - cron: '30 3,15 * * *'
 
   repository_dispatch:
     types: [run-scraper]

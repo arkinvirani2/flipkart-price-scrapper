@@ -26,8 +26,9 @@ GitHub Actions ──service-role──> Supabase Postgres
 
 - **Supabase** is the record of truth. Batches, uploaded rows, results and recommendations
   are tables; there is no shared filesystem and nothing authoritative in memory.
-- **GitHub Actions** is the scraper's runtime. It runs twice a day on a schedule, and the
-  dashboard's Start button pokes it awake. Nothing needs to stay on for a batch to run.
+- **GitHub Actions** is the scraper's runtime. The twice-daily schedule is switched off, so
+  batches run when you ask for them — the dashboard's Start button pokes the workflow awake,
+  or you run it from the Actions tab. Nothing needs to stay on for a batch to run.
 - **Vercel** serves the UI and a handful of routes that read and write Supabase. Playwright
   is not in that deployment at all.
 

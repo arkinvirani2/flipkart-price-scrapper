@@ -42,34 +42,50 @@ $fn$;
 
 revoke execute on function public.prune_jobs(integer) from anon, authenticated, public;
 
--- ───────────────────────────────────────────────────────────────── schedule
+-- ─────────────────────────────────────────────────── schedule (DISABLED)
 --
--- pg_cron runs inside the database, so retention does not depend on the
--- dashboard being visited or the workflow firing. Times are UTC.
--- 19:00 UTC = 00:30 IST, i.e. after both daily batches have finished.
+-- Retention no longer runs on a timer. Pruning is a manual step now, same as
+-- the scraper batches: run
 --
--- The whole block is guarded, including the CREATE EXTENSION: enabling pg_cron
--- is a privileged operation, and on a project where it is not available this
--- must degrade to a notice rather than abort the migration and leave
--- prune_jobs() defined but the rest of the file unapplied.
+--     select public.prune_jobs(30);
 --
--- If the notice appears, either enable pg_cron from the Supabase dashboard
--- (Database → Extensions) and re-run this file, or run
--- `select public.prune_jobs(30);` by hand from the SQL editor now and then.
--- Nothing else depends on it — retention is a tidy-up, not a correctness rule.
+-- from the Supabase SQL editor whenever the job list gets long. prune_jobs()
+-- itself is untouched above — only its trigger is gone.
+--
+-- The block below removes the pg_cron entry if a previous version of this file
+-- installed one. It is guarded twice: the `where exists` skips a database that
+-- never had the job, and the exception handler covers a project where pg_cron
+-- is not installed at all, so this is safe to apply to a fresh database and
+-- safe to re-run on an existing one.
 
 do $do$
 begin
-  create extension if not exists pg_cron;
-
   perform cron.unschedule('prune-jobs')
     where exists (select 1 from cron.job where jobname = 'prune-jobs');
 
-  perform cron.schedule('prune-jobs', '0 19 * * *', $cron$select public.prune_jobs(30);$cron$);
-
-  raise notice 'prune_jobs(30) scheduled daily at 19:00 UTC (00:30 IST).';
+  raise notice 'prune-jobs cron entry removed (if it existed). Run select public.prune_jobs(30); by hand.';
 exception
   when others then
-    raise notice 'pg_cron not available (%). Run select public.prune_jobs(30); yourself — see the comment above.', sqlerrm;
+    raise notice 'pg_cron not available (%); nothing to unschedule.', sqlerrm;
 end
 $do$;
+
+-- The original daily schedule, kept for reference. Uncomment
+-- this block (and drop the unschedule above) to put retention back on a timer.
+-- 19:00 UTC = 00:30 IST, i.e. after both daily batches would have finished.
+--
+-- do $do$
+-- begin
+--   create extension if not exists pg_cron;
+--
+--   perform cron.unschedule('prune-jobs')
+--     where exists (select 1 from cron.job where jobname = 'prune-jobs');
+--
+--   perform cron.schedule('prune-jobs', '0 19 * * *', $cron$select public.prune_jobs(30);$cron$);
+--
+--   raise notice 'prune_jobs(30) scheduled daily at 19:00 UTC (00:30 IST).';
+-- exception
+--   when others then
+--     raise notice 'pg_cron not available (%). Run select public.prune_jobs(30); yourself.', sqlerrm;
+-- end
+-- $do$;
