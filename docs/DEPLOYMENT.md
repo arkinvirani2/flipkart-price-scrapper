@@ -79,6 +79,7 @@ swap `to anon` for `to authenticated` in `0003_rls.sql`.
 | `GITHUB_DISPATCH_TOKEN` | the PAT from step 3 | **No** |
 | `GITHUB_REPO` | `your-user/flipkart-price-scrapper` | No |
 | `ANALYTICS_TIMEZONE` | optional, default `Asia/Kolkata` | No |
+| `IP_ALLOWLIST` | optional — restricts who can open the app, see below | No |
 
 Playwright is a devDependency, so Vercel's production install never downloads Chromium and
 no route imports it. If you see Playwright in a Vercel build log, something has imported the
@@ -87,6 +88,60 @@ scraper into the app by accident.
 `ANALYTICS_TIMEZONE` decides the buckets on the products-per-hour chart. It has a default
 because the old code used the serving machine's local clock, which on Vercel would silently
 have become UTC and shifted every bar.
+
+---
+
+## 2b. Restricting access by IP
+
+The dashboard has no login. Anyone with the URL can queue scrape jobs, read competitor
+pricing and export it. `IP_ALLOWLIST` is the front door: set it in the Vercel project env
+and only those addresses reach the app at all — pages, API routes and JS bundles alike.
+Everyone else gets a 403 from `middleware.ts` before any route runs.
+
+**Leave it unset and the gate is open.** The feature is opt-in, so a fresh clone and local
+development keep working untouched.
+
+### Setting it
+
+Find the address you want to allow (<https://ifconfig.me>), then in Vercel → Settings →
+Environment Variables add `IP_ALLOWLIST`:
+
+```
+203.0.113.7, 198.51.100.0/24 # office, 2001:db8::/32
+```
+
+IPv4 or IPv6, bare or CIDR, separated by commas or newlines, `#` starts a comment. A bare
+address is an exact match (a /32 or /128). Entries that do not parse are logged and skipped
+rather than crashing the middleware — one typo costs you that entry, not the whole site.
+
+**Environment variable changes only take effect on the next deployment.** After saving the
+variable, redeploy from the Vercel dashboard.
+
+### Do not lock yourself out
+
+Home broadband is usually a *dynamic* address — the ISP can rotate it without warning, and
+a bare host entry will then shut you out of your own dashboard. Safer choices, in order:
+
+- a static-IP VPN, or the office's fixed address;
+- the ISP's block rather than the single host, e.g. `203.0.113.0/24` — less precise, but it
+  survives a rotation;
+- a bare address only when you know it is static.
+
+If it does happen, nothing is lost: the Vercel dashboard is not behind the allowlist. Edit
+`IP_ALLOWLIST` there and redeploy.
+
+### What it does not cover
+
+- **Vercel only.** The GitHub Actions worker talks to Supabase directly and never calls this
+  app, so the allowlist does not affect scraping. Supabase has its own network restrictions
+  if you want the same treatment for the database.
+- **Not a replacement for keeping the service-role key secret.** An allowed address still
+  has full run of the app.
+- Loopback (`127.0.0.0/8`, `::1`) is always allowed — that is `next dev` talking to itself.
+  A remote client cannot forge it: on Vercel the address comes from the TCP connection via
+  `x-vercel-forwarded-for`, not from a header the caller controls.
+
+Run `npm run test:ip` to exercise the matching rules.
 
 ---
 

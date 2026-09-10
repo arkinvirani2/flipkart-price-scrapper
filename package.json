@@ -21,7 +21,8 @@
     "test:store": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/store.test.ts",
     "test:recommendation": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/recommendation.test.ts",
     "test:width": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/poolWidth.test.ts",
-    "test:limiter": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/rateLimiter.test.ts"
+    "test:limiter": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/rateLimiter.test.ts",
+    "test:ip": "ts-node -T -r tsconfig-paths/register --project tsconfig.test.json scripts/ipAllowlist.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
