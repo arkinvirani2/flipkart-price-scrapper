@@ -95,7 +95,7 @@ create table if not exists public.job_inputs (
   target_seller text not null,
   product_url   text not null,
 
-  -- Settlement inputs. The scraper reads none of these; they pass through from
+  -- Settlement inputs. The scraper reads none of 1 these; they pass through from
   -- the spreadsheet to the settlement and recommendation views.
   current_bank_settlement   numeric,
   bank_settlement_threshold numeric,
