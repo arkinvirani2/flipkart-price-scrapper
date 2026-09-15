@@ -8,78 +8,58 @@
 
 import { NextResponse } from 'next/server';
 import { validateUpload } from '@/lib/validation/uploadSchema';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { minimumSettlementBySku, spreadsheetToScrapeRows } from '@/lib/validation/spreadsheetUpload';
 
 export const runtime = 'nodejs';
+// Parsing a large workbook can take longer than Vercel's short default.
+export const maxDuration = 300;
 
-/** Guard against someone posting a multi-gigabyte file into memory. */
-const MAX_BYTES = 25 * 1024 * 1024;
+const BUCKET = 'upload-staging';
+const STAGED_PATH = /^[0-9a-f-]{36}\/[a-zA-Z0-9._-]+$/;
 
 export async function POST(request: Request) {
-  const contentType = request.headers.get('content-type') ?? '';
-  let text: string;
-  let filename = 'upload.xlsx';
+  let body: { filePath?: unknown; minimumFilePath?: unknown; targetSeller?: unknown };
 
   try {
-    if (contentType.includes('multipart/form-data')) {
-      const form = await request.formData();
-      const file = form.get('file');
-      const minimumFile = form.get('minimumFile');
-      const targetSeller = String(form.get('targetSeller') ?? '').trim();
+    body = await request.json();
+  } catch (error) {
+    return NextResponse.json({ error: 'Request body must be JSON.' }, { status: 400 });
+  }
 
-      if (!targetSeller) {
-        return NextResponse.json({ error: 'Target seller is required.' }, { status: 400 });
-      }
+  const targetSeller = typeof body.targetSeller === 'string' ? body.targetSeller.trim() : '';
+  const filePath = typeof body.filePath === 'string' ? body.filePath : '';
+  const minimumFilePath = typeof body.minimumFilePath === 'string' ? body.minimumFilePath : '';
+  if (!targetSeller) return NextResponse.json({ error: 'Target seller is required.' }, { status: 400 });
+  if (!STAGED_PATH.test(filePath) || !STAGED_PATH.test(minimumFilePath)) {
+    return NextResponse.json({ error: 'Upload references are invalid. Please choose the files again.' }, { status: 400 });
+  }
 
-      // Duck-typed, not `instanceof File`: the File global only exists in Node
-      // 20+, and this project supports Node 18. A form file is a Blob with a
-      // name, which is all we actually use.
-      if (!file || typeof file === 'string' || typeof (file as Blob).text !== 'function') {
-        return NextResponse.json({ error: 'No listing file was uploaded.' }, { status: 400 });
-      }
-      if (!minimumFile || typeof minimumFile === 'string' || typeof (minimumFile as Blob).text !== 'function') {
-        return NextResponse.json({ error: 'No minimum bank settlement file was uploaded.' }, { status: 400 });
-      }
+  try {
+    const storage = supabaseAdmin().storage.from(BUCKET);
+    const [listing, minimum] = await Promise.all([storage.download(filePath), storage.download(minimumFilePath)]);
+    if (listing.error || !listing.data) throw new Error(listing.error?.message ?? 'Could not read the listing file.');
+    if (minimum.error || !minimum.data) throw new Error(minimum.error?.message ?? 'Could not read the minimum settlement file.');
 
-      const blob = file as Blob & { name?: string };
-      const minimumBlob = minimumFile as Blob & { name?: string };
-      if (blob.size > MAX_BYTES) {
-        return NextResponse.json(
-          { error: `Listing file is ${(blob.size / 1024 / 1024).toFixed(1)}MB; the limit is 25MB.` },
-          { status: 413 },
-        );
-      }
-      if (minimumBlob.size > MAX_BYTES) {
-        return NextResponse.json(
-          { error: `Minimum bank settlement file is ${(minimumBlob.size / 1024 / 1024).toFixed(1)}MB; the limit is 25MB.` },
-          { status: 413 },
-        );
-      }
-      filename = blob.name || filename;
-
-      const minimumBySku = minimumSettlementBySku(await minimumBlob.arrayBuffer());
-      if (minimumBySku.size === 0) {
-        return NextResponse.json(
-          { error: 'Minimum bank settlement file must contain SKU and "Minimum Bank Settlement price" columns.' },
-          { status: 400 },
-        );
-      }
-
-      const rows = spreadsheetToScrapeRows(await blob.arrayBuffer(), targetSeller, minimumBySku);
-      text = JSON.stringify(rows);
-    } else {
-      text = await request.text();
-      if (text.length > MAX_BYTES) {
-        return NextResponse.json({ error: 'Payload too large.' }, { status: 413 });
-      }
+    const minimumBySku = minimumSettlementBySku(await minimum.data.arrayBuffer());
+    if (minimumBySku.size === 0) {
+      return NextResponse.json(
+        { error: 'Minimum bank settlement file must contain SKU and "Minimum Bank Settlement price" columns.' },
+        { status: 400 },
+      );
     }
+
+    const rows = spreadsheetToScrapeRows(await listing.data.arrayBuffer(), targetSeller, minimumBySku);
+    const report = validateUpload(JSON.stringify(rows));
+    return NextResponse.json({ filename: filePath.split('/')[1] || 'upload.xlsx', report });
   } catch (error) {
     return NextResponse.json(
       { error: `Could not read the upload: ${error instanceof Error ? error.message : String(error)}` },
       { status: 400 },
     );
+  } finally {
+    // They are only a transport bridge. Validation returns the parsed rows and
+    // no user file needs to persist after that.
+    await supabaseAdmin().storage.from(BUCKET).remove([filePath, minimumFilePath]);
   }
-
-  const report = validateUpload(text);
-  return NextResponse.json({ filename, report });
 }

@@ -19,6 +19,7 @@ import type { OrdersReport } from '@/lib/demand';
 // Type-only, so the server modules these live in are never pulled into the bundle.
 import type { AccountSummary } from '@/lib/store/jobStore';
 import type { RecommendationFile } from '@/lib/services/recommendations';
+import { supabaseBrowser } from '@/lib/supabase/client';
 
 export class ApiError extends Error {
   constructor(
@@ -146,15 +147,29 @@ export const api = {
 
   analytics: (jobId: string) => request<AnalyticsPayload>(`/api/jobs/${jobId}/analytics`),
 
-  validateUpload: (file: File, minimumFile: File, targetSeller: string) => {
-    const form = new FormData();
-    form.append('file', file);
-    form.append('minimumFile', minimumFile);
-    form.append('targetSeller', targetSeller);
-    return request<{ filename: string; report: ValidationReport }>(
-      '/api/upload',
-      { method: 'POST', body: form },
-    );
+  validateUpload: async (file: File, minimumFile: File, targetSeller: string) => {
+    const prepared = await request<{
+      bucket: string;
+      uploads: { path: string; token: string }[];
+    }>('/api/upload/sign', {
+      method: 'POST',
+      body: JSON.stringify({ files: [file, minimumFile].map(({ name, type }) => ({ name, contentType: type })) }),
+    });
+    const client = supabaseBrowser();
+    if (!client) throw new Error('Supabase browser settings are missing.');
+
+    await Promise.all(prepared.uploads.map(async (upload, index) => {
+      const source = index === 0 ? file : minimumFile;
+      const { error } = await client.storage.from(prepared.bucket).uploadToSignedUrl(upload.path, upload.token, source, {
+        contentType: source.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      if (error) throw new Error(error.message);
+    }));
+
+    return request<{ filename: string; report: ValidationReport }>('/api/upload', {
+      method: 'POST',
+      body: JSON.stringify({ filePath: prepared.uploads[0]?.path, minimumFilePath: prepared.uploads[1]?.path, targetSeller }),
+    });
   },
 
   retryRows: (jobId: string, indexes: number[]) =>

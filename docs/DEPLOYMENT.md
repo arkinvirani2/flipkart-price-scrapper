@@ -30,6 +30,7 @@ time, checking each succeeds before the next:
 | `0004_claim.sql` | `claim_job()`, `heartbeat_job()`, `release_job()`, `reap_stale_jobs()` — the lease. |
 | `0005_retention.sql` | The 30-batches-per-account prune. It is the only migration that deletes anything — apply it only once the rest works. |
 | `0006_source_api.sql` | Widens the `job_results.source` check to allow `'api'`. **Apply before running a worker built after the seller-API change**, or every result it produces is rejected by the constraint and lost. |
+| `0007_upload_staging.sql` | Creates the private, temporary Storage bucket used for direct spreadsheet uploads. **Required before deploying the large-upload change.** |
 
 `0005` no longer schedules anything: the nightly pg_cron entry is commented out and the file
 unschedules an existing `prune-jobs` entry if a previous version installed one. Run
@@ -84,6 +85,19 @@ swap `to anon` for `to authenticated` in `0003_rls.sql`.
 Playwright is a devDependency, so Vercel's production install never downloads Chromium and
 no route imports it. If you see Playwright in a Vercel build log, something has imported the
 scraper into the app by accident.
+
+### Large spreadsheet uploads
+
+The dashboard does not send spreadsheets through Vercel. It first asks the app for short-lived
+Supabase Storage upload tokens, uploads each selected XLS/XLSX directly to the private
+`upload-staging` bucket, and then sends only the two object references to the validation route.
+That avoids Vercel's request-body limit (the source of HTTP 413 responses) without changing the
+two-file validation or batch-creation flow. The files are deleted as soon as validation finishes.
+
+The bucket migration intentionally sets no application-level file-size limit. The effective
+ceiling is the Supabase Storage/project plan and the Vercel function memory/time needed to parse
+the workbook; no hosted service can promise an unbounded file size. For very large or slow-to-
+parse exports, use a Supabase/Vercel plan with sufficient Storage capacity and function resources.
 
 `ANALYTICS_TIMEZONE` decides the buckets on the products-per-hour chart. It has a default
 because the old code used the serving machine's local clock, which on Vercel would silently
