@@ -14,5 +14,5 @@ next-env.d.ts
 /results.json
 /results.ndjson
 
-# Worker crash-safety journals (see worker/journal.ts).
+# Worker crash-safety journals (see worker/journal.ts)
 /worker-journal
